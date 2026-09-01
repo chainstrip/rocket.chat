@@ -638,6 +638,17 @@ jobs:
     # Dependency changes only. Everything else leaves the dependency surface
     # untouched, and the gate would restore a baseline just to report no change.
     if: github.event_name == 'pull_request' && needs.release-versions.outputs.dependencies-changed == 'true'
+    # A CALLED WORKFLOW CANNOT REQUEST MORE THAN ITS CALLER GRANTS, and this
+    # file's top-level block grants only contents:read and actions:read. The
+    # gate reads @chainstrip/cli from GitHub Packages and writes one sticky
+    # verdict comment, so without this the workflow is REJECTED AT LOAD - a
+    # one-second startup failure with no logs and no annotation, which is how
+    # this was found. Widening the calling job keeps the grant on the one job
+    # that needs it instead of on all thirty.
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
 
     uses: ./.github/workflows/ci-chainstrip.yml
     with:
