@@ -88,11 +88,29 @@ jobs:
       # chainstrip's buildCommand is `yarn build:ci` inside apps/meteor, which is
       # `meteor build`. The tool must be on PATH before the run starts, or the
       # build gate reports every validated dependency as a build failure.
+      # NO PASSWORDLESS sudo ON THIS RUNNER. The installer unpacks into
+      # ~/.meteor and then tries to `sudo cp` a launcher into /usr/local/bin,
+      # which fails with "a terminal is required to read the password". It then
+      # exits ZERO having told you the remedy itself: put $HOME/.meteor on PATH.
+      # MEASURED: the second baseline died here, `meteor: command not found`,
+      # exit 127. The project's own meteor-build action does the sudo cp, which
+      # works on a GitHub-hosted image and cannot work here.
+      #
+      # The launcher self-manages its version: run inside apps/meteor it reads
+      # .meteor/release and fetches METEOR@3.4.1, whatever the bootstrap
+      # installer happened to download.
       - name: Install Meteor
         run: |
           set -euo pipefail
-          command -v meteor >/dev/null 2>&1 || curl https://install.meteor.com | sed s/--progress-bar/-sL/g | /bin/sh
-          meteor --version
+          if [ ! -x "$HOME/.meteor/meteor" ]; then
+            curl https://install.meteor.com | sed s/--progress-bar/-sL/g | /bin/sh || true
+          fi
+          test -x "$HOME/.meteor/meteor"
+          echo "$HOME/.meteor" >> "$GITHUB_PATH"
+
+      # A SEPARATE STEP, because GITHUB_PATH only takes effect in later ones.
+      - name: Verify Meteor
+        run: meteor --version
 
       # apps/meteor imports the workspace packages from their dist/, so nothing
       # runs until turbo has built them.
