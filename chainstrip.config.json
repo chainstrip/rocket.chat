@@ -1,0 +1,17 @@
+{
+  "target": ".",
+  "stateDir": ".chainstrip",
+  "sandbox": { "mode": "enforce", "allowDegraded": true },
+  "testCommand": ["yarn", "run", ".testunit:jest"],
+  "testCwd": "apps/meteor",
+  "testRunner": "jest",
+  "buildCommand": ["yarn", "run", "build:ci"],
+  "buildCwd": "apps/meteor",
+  "covtoolchain": {
+    "commands": [["yarn", "run", "build:ci"]],
+    "cwd": "apps/meteor"
+  },
+  "update": {
+    "block": ["retained-surface-changed", "validation-regression", "capability-escalation", "manual-review-required", "expanded-usage-vulnerable", "new-dependency", "reachable-cve"]
+  }
+}

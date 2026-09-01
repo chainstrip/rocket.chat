@@ -46,6 +46,7 @@ jobs:
       packages-build-cache-key: ${{ steps.ci-cache-keys.outputs.packages-build-cache-key }}
       meteor-rc-cache-key: ${{ steps.ci-cache-keys.outputs.meteor-rc-cache-key }}
       github-actions-changed: ${{ steps.diff.outputs.actions-changed }}
+      dependencies-changed: ${{ steps.diff.outputs.deps-changed }}
       # this is 100% intentional, secrets are not available for forks, so ee-tests will always fail
       # to avoid this, we are using a dummy license, expiring at 2027-07-01
       enterprise-license: MK+bpK5NveUuNlWGaQXGoy+8b74Luet82M3ZGcBB8b5P9Y+m67NEtpW64dc1d5lEWi6d0nFjCjtCMneVD7bKxodz/Cml8URKEo5P7cQb/9wmeT0MzAhYNaRFZlIGkZ3ITF59pDV2u4HZuosEDJikVRwnaJ5ZoU/pOsHSPUPhTyGNIqLeKynODtUpfwDdIKEmHxpf2yVkKjgRiIJmbWjM6A4k+MNNYXWVXHzye7GggqWVg/ZcT7nKU1CCadpLhTJiIrgrrPzil1G5DQ4xnLs3Q2tu2dILSDiW5OYw/ywu2yCMicTjMq4MLL5SXDQJj6WoJzZ54HosbvsDzOXvsdC9gI1CjhPL2uRuvC8XLrzn3vL2UgXnifzD1VrLTtdZ+aSADveqtlzYlRWtqoUFBbNw8o+YVHdhbZGR0beMoAyRbHi5EMpxpad3L+NyztUIT/Uh/IjQ/C2SQZ6jB0GKPBOPxFLN56FNhTGrffLFR++TVoBu0Iquc7kajWkNit3bVbZvbx+oFcVW2PcjQ/+i2jpJjbgtUFUKrTKxGMAXTWoDzIQQ35zNzGAy268IM4Ymp5JmsVEnBOEUkbF9yx6fzkO6xZhpsHf0muklnW0kA+Tlore/TUrBWh1/RwWlQeZlxM5NyWoRM5onQmr/k/4BmObtL1Hpmbk8oMG29z89xtE9y/4=
@@ -153,6 +154,14 @@ jobs:
             echo "actions-changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+          # chainstrip's update gate only has something to say when the
+          # dependency surface moved, so ask once here rather than making the
+          # gate job start a runner to find out it had no work.
+          if gh pr diff --name-only --repo "${GITHUB_REPOSITORY}" "${GH_PR_NUM}" | grep -q -e 'yarn.lock' -e 'package.json' -e '.yarn/patches/'; then
+            echo "Dependency changes detected"
+            echo "deps-changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test-guard:
     name: ⚙️ Test Guard
     runs-on: ubuntu-24.04-arm
@@ -232,6 +241,20 @@ jobs:
     name: 📦 Build Packages
     needs: [release-versions]
     runs-on: ubuntu-24.04-arm
+    # THE ONE SWITCH THAT NEUTERS THIS FORK. Set the repository variable
+    # CHAINSTRIP_TESTBED to "true" and this job skips; every heavy job below
+    # reaches the pipeline through it, so they all skip with it - the Meteor
+    # builds, the docker images, the ten e2e suites, storybook and the unit
+    # tests. This fork exists to measure chainstrip against a real dependency
+    # tree on ONE self-hosted runner, and it has neither the secrets nor the
+    # ARM runners the upstream pipeline assumes.
+    #
+    # Unset - which is what upstream is - changes nothing.
+    #
+    # What deliberately still runs: release-versions and test-guard, which are
+    # two API calls; actionlint, which is cheap and guards the file you are
+    # reading; and chainstrip-gate, which needs release-versions only.
+    if: vars.CHAINSTRIP_TESTBED != 'true'
     steps:
       - name: Cache build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -609,6 +632,31 @@ jobs:
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  chainstrip-gate:
+    name: 🔒 Chainstrip Gate
+    needs: [release-versions]
+    # Dependency changes only. Everything else leaves the dependency surface
+    # untouched, and the gate would restore a baseline just to report no change.
+    if: github.event_name == 'pull_request' && needs.release-versions.outputs.dependencies-changed == 'true'
+    # A CALLED WORKFLOW CANNOT REQUEST MORE THAN ITS CALLER GRANTS, and this
+    # file's top-level block grants only contents:read and actions:read. The
+    # gate reads @chainstrip/cli from GitHub Packages and writes one sticky
+    # verdict comment, so without this the workflow is REJECTED AT LOAD - a
+    # one-second startup failure with no logs and no annotation, which is how
+    # this was found. Widening the calling job keeps the grant on the one job
+    # that needs it instead of on all thirty.
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+
+    uses: ./.github/workflows/ci-chainstrip.yml
+    with:
+      node-version: ${{ needs.release-versions.outputs.node-version }}
+      deno-version: ${{ needs.release-versions.outputs.deno-version }}
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   test-api:
     name: 🔨 Test API (CE)
     needs: [checks, build-gh-docker-publish, release-versions]
@@ -985,12 +1033,24 @@ jobs:
   tests-done:
     name: ✅ Tests Done
     runs-on: ubuntu-24.04-arm
-    needs: [test-guard, checks, test-unit, test-api, test-ui, test-api-ee, test-ui-ee, test-api-livechat, test-api-livechat-ee, test-api-apps-node-ee, test-api-fips, test-api-livechat-fips, test-ui-fips, test-federation-matrix]
-    if: always() && needs.test-guard.outputs.skip-tests != 'true'
+    needs: [test-guard, checks, test-unit, test-api, test-ui, test-api-ee, test-ui-ee, test-api-livechat, test-api-livechat-ee, test-api-apps-node-ee, test-api-fips, test-api-livechat-fips, test-ui-fips, test-federation-matrix, chainstrip-gate]
+    # Skipped on the testbed fork too: with packages-build off, every job this
+    # aggregates is skipped, and 'skipped' is not 'success', so the aggregation
+    # would fail a pull request over jobs that were never meant to run. The
+    # chainstrip gate reports as its own check and needs no aggregator.
+    if: always() && needs.test-guard.outputs.skip-tests != 'true' && vars.CHAINSTRIP_TESTBED != 'true'
     steps:
       - name: Test finish aggregation
         run: |
           if [[ '${{ needs.checks.result }}' != 'success' ]]; then
+            exit 1
+          fi
+
+          # SKIPPED IS A PASS HERE, and it has to be: the gate only runs when a
+          # PR touches the dependency surface, so on every other PR its result
+          # is 'skipped'. Treating that as a failure would block every PR that
+          # changes no dependency at all - which is most of them.
+          if [[ '${{ needs.chainstrip-gate.result }}' != 'success' && '${{ needs.chainstrip-gate.result }}' != 'skipped' ]]; then
             exit 1
           fi
 
