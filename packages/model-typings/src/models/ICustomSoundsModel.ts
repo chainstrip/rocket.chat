@@ -1,0 +1,11 @@
+import type { ICustomSound } from '@rocket.chat/core-typings';
+import type { FindCursor, FindOptions, InsertOneResult, UpdateResult, WithId } from 'mongodb';
+
+import type { IBaseModel } from './IBaseModel';
+
+export interface ICustomSoundsModel extends IBaseModel<ICustomSound> {
+	findByName(name: string, exceptId?: string, options?: FindOptions<ICustomSound>): FindCursor<ICustomSound>;
+	findOneByName(name: string, exceptId?: string, options?: FindOptions<ICustomSound>): Promise<ICustomSound | null>;
+	create(data: Omit<ICustomSound, '_id' | '_updatedAt'>): Promise<InsertOneResult<WithId<ICustomSound>>>;
+	updateById(_id: string, data: Partial<Omit<ICustomSound, '_id'>>): Promise<UpdateResult>;
+}
