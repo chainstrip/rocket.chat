@@ -23,6 +23,23 @@ treats a skip as a pass.
 Both jobs run on the `self-hosted` runner. The repository variable
 `CHAINSTRIP_LARGE_RUNNER` overrides that label without editing a workflow.
 
+## This fork does not run the upstream pipeline
+
+`packages-build` in `ci.yml` carries `if: vars.CHAINSTRIP_TESTBED != 'true'`,
+and every heavy job reaches the pipeline through it: the Meteor builds, the
+docker images, the ten e2e suites, storybook and the unit tests. Setting the
+repository variable `CHAINSTRIP_TESTBED` to `true` therefore skips all of them
+with one switch. `Tests Done` is skipped for the same reason, because it would
+otherwise fail a pull request over jobs that were never meant to run.
+
+What still runs: `release-versions` and `test-guard`, which are two API calls;
+`actionlint`; and `chainstrip-gate`, which depends on `release-versions` only.
+
+Unset, which is what upstream is, none of this applies. Every unrelated
+standalone workflow - releases, codeql, the issue bots, gh-pages - is disabled
+at the repository level rather than edited, so the files stay as upstream wrote
+them.
+
 ## Configuration
 
 `chainstrip.config.json` at the repository root:

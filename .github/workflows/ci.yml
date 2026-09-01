@@ -241,6 +241,20 @@ jobs:
     name: 📦 Build Packages
     needs: [release-versions]
     runs-on: ubuntu-24.04-arm
+    # THE ONE SWITCH THAT NEUTERS THIS FORK. Set the repository variable
+    # CHAINSTRIP_TESTBED to "true" and this job skips; every heavy job below
+    # reaches the pipeline through it, so they all skip with it - the Meteor
+    # builds, the docker images, the ten e2e suites, storybook and the unit
+    # tests. This fork exists to measure chainstrip against a real dependency
+    # tree on ONE self-hosted runner, and it has neither the secrets nor the
+    # ARM runners the upstream pipeline assumes.
+    #
+    # Unset - which is what upstream is - changes nothing.
+    #
+    # What deliberately still runs: release-versions and test-guard, which are
+    # two API calls; actionlint, which is cheap and guards the file you are
+    # reading; and chainstrip-gate, which needs release-versions only.
+    if: vars.CHAINSTRIP_TESTBED != 'true'
     steps:
       - name: Cache build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1009,7 +1023,11 @@ jobs:
     name: ✅ Tests Done
     runs-on: ubuntu-24.04-arm
     needs: [test-guard, checks, test-unit, test-api, test-ui, test-api-ee, test-ui-ee, test-api-livechat, test-api-livechat-ee, test-api-apps-node-ee, test-api-fips, test-api-livechat-fips, test-ui-fips, test-federation-matrix, chainstrip-gate]
-    if: always() && needs.test-guard.outputs.skip-tests != 'true'
+    # Skipped on the testbed fork too: with packages-build off, every job this
+    # aggregates is skipped, and 'skipped' is not 'success', so the aggregation
+    # would fail a pull request over jobs that were never meant to run. The
+    # chainstrip gate reports as its own check and needs no aggregator.
+    if: always() && needs.test-guard.outputs.skip-tests != 'true' && vars.CHAINSTRIP_TESTBED != 'true'
     steps:
       - name: Test finish aggregation
         run: |
