@@ -1,0 +1,115 @@
+name: Chainstrip Baseline
+
+# The heavy half of the split. Runs on master only, builds the full hardened
+# artifact (chainstrip run: inventory -> trace -> sweep -> buildgate -> fileprune
+# -> cove2e -> covtrim -> gate -> pack) and CACHES the gate-baseline set keyed on
+# yarn.lock. Pull requests restore that instead of rebuilding it.
+#
+# This is the expensive job. It holds the self-hosted runner for hours, so what
+# triggers it matters: paths that cannot change what the pipeline measures are
+# ignored. chainstrip-baseline.yml itself is deliberately NOT ignored, because a
+# change to this file DOES change the run.
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - ".github/workflows/ci-chainstrip.yml"
+      - ".github/scripts/**"
+      - "**.md"
+  workflow_dispatch: {}
+
+concurrency:
+  group: chainstrip-baseline
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  baseline:
+    name: Baseline (full run)
+    runs-on: ${{ vars.CHAINSTRIP_LARGE_RUNNER || 'self-hosted' }}
+    timeout-minutes: 720
+    permissions:
+      contents: read
+      packages: read # read @chainstrip/cli from GitHub Packages with the ambient token
+    env:
+      CHAINSTRIP_RUN_ORIGIN: ci
+      TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
+      # apps/meteor's own build:ci sets METEOR_DEBUG_BUILD and disables
+      # optimistic caching. BABEL_ENV mirrors what .github/actions/meteor-build
+      # passes for a production build, so the build oracle compiles the same way
+      # the release pipeline does. A dev-mode build skips production-only plugins
+      # and gates nothing.
+      BABEL_ENV: production
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve tool versions
+        id: tools
+        run: |
+          echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
+          echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup NodeJS
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.tools.outputs.node-version }}
+          deno-version: ${{ steps.tools.outputs.deno-version }}
+          cache-modules: true
+          install: true
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # chainstrip's buildCommand is `yarn build:ci` inside apps/meteor, which is
+      # `meteor build`. The tool must be on PATH before the run starts, or the
+      # build gate reports every validated dependency as a build failure.
+      - name: Install Meteor
+        run: |
+          set -euo pipefail
+          command -v meteor >/dev/null 2>&1 || curl https://install.meteor.com | sed s/--progress-bar/-sL/g | /bin/sh
+          meteor --version
+
+      # apps/meteor imports the workspace packages from their dist/, so nothing
+      # runs until turbo has built them.
+      - name: Build workspace packages
+        run: yarn build
+
+      - uses: ./.github/actions/setup-chainstrip
+        with:
+          version: ${{ vars.CHAINSTRIP_CLI_VERSION || 'latest' }}
+          # chainstrip.config.json asks for `"sandbox": {"mode": "enforce"}` with
+          # allowDegraded, so a missing launcher degrades and says so rather than
+          # refusing. Set CHAINSTRIP_CSBOX_PACKAGE (or _PATH on this runner) to
+          # contain the dependency code chainstrip executes.
+          csbox: ${{ vars.CHAINSTRIP_CSBOX_PACKAGE || '' }}
+          csbox_path: ${{ vars.CHAINSTRIP_CSBOX_PATH }}
+
+      - name: Build the baseline
+        run: $CHAINSTRIP run
+
+      - name: Cache the gate baseline
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          key: chainstrip-baseline-${{ hashFiles('yarn.lock') }}
+          # exactly the set the gate reads - NOT .chainstrip/workspaces|bundles|runs
+          path: |
+            .chainstrip/artifacts
+            .chainstrip/extracted-deps
+            .chainstrip/inventory.json
+            .chainstrip/tiers.json
+            .chainstrip/test-impact-map.json
+            .chainstrip/covtrim-report.json
+            .chainstrip/fileprune-report.json
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chainstrip-baseline-report
+          path: .chainstrip/*-report.json
+          # .chainstrip is a DOT-directory and the action skips hidden paths by
+          # default: without this the artifact uploads zero files and the step
+          # still reports success.
+          include-hidden-files: true
+          if-no-files-found: ignore

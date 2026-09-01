@@ -46,6 +46,7 @@ jobs:
       packages-build-cache-key: ${{ steps.ci-cache-keys.outputs.packages-build-cache-key }}
       meteor-rc-cache-key: ${{ steps.ci-cache-keys.outputs.meteor-rc-cache-key }}
       github-actions-changed: ${{ steps.diff.outputs.actions-changed }}
+      dependencies-changed: ${{ steps.diff.outputs.deps-changed }}
       # this is 100% intentional, secrets are not available for forks, so ee-tests will always fail
       # to avoid this, we are using a dummy license, expiring at 2027-07-01
       enterprise-license: MK+bpK5NveUuNlWGaQXGoy+8b74Luet82M3ZGcBB8b5P9Y+m67NEtpW64dc1d5lEWi6d0nFjCjtCMneVD7bKxodz/Cml8URKEo5P7cQb/9wmeT0MzAhYNaRFZlIGkZ3ITF59pDV2u4HZuosEDJikVRwnaJ5ZoU/pOsHSPUPhTyGNIqLeKynODtUpfwDdIKEmHxpf2yVkKjgRiIJmbWjM6A4k+MNNYXWVXHzye7GggqWVg/ZcT7nKU1CCadpLhTJiIrgrrPzil1G5DQ4xnLs3Q2tu2dILSDiW5OYw/ywu2yCMicTjMq4MLL5SXDQJj6WoJzZ54HosbvsDzOXvsdC9gI1CjhPL2uRuvC8XLrzn3vL2UgXnifzD1VrLTtdZ+aSADveqtlzYlRWtqoUFBbNw8o+YVHdhbZGR0beMoAyRbHi5EMpxpad3L+NyztUIT/Uh/IjQ/C2SQZ6jB0GKPBOPxFLN56FNhTGrffLFR++TVoBu0Iquc7kajWkNit3bVbZvbx+oFcVW2PcjQ/+i2jpJjbgtUFUKrTKxGMAXTWoDzIQQ35zNzGAy268IM4Ymp5JmsVEnBOEUkbF9yx6fzkO6xZhpsHf0muklnW0kA+Tlore/TUrBWh1/RwWlQeZlxM5NyWoRM5onQmr/k/4BmObtL1Hpmbk8oMG29z89xtE9y/4=
@@ -151,6 +152,14 @@ jobs:
           if gh pr diff --name-only --repo "${GITHUB_REPOSITORY}" "${GH_PR_NUM}" | grep -q -e .github/workflows -e .github/actions; then
             echo "Workflow changes detected"
             echo "actions-changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # chainstrip's update gate only has something to say when the
+          # dependency surface moved, so ask once here rather than making the
+          # gate job start a runner to find out it had no work.
+          if gh pr diff --name-only --repo "${GITHUB_REPOSITORY}" "${GH_PR_NUM}" | grep -q -e 'yarn.lock' -e 'package.json' -e '.yarn/patches/'; then
+            echo "Dependency changes detected"
+            echo "deps-changed=true" >> "$GITHUB_OUTPUT"
           fi
 
   test-guard:
@@ -609,6 +618,20 @@ jobs:
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  chainstrip-gate:
+    name: 🔒 Chainstrip Gate
+    needs: [release-versions]
+    # Dependency changes only. Everything else leaves the dependency surface
+    # untouched, and the gate would restore a baseline just to report no change.
+    if: github.event_name == 'pull_request' && needs.release-versions.outputs.dependencies-changed == 'true'
+
+    uses: ./.github/workflows/ci-chainstrip.yml
+    with:
+      node-version: ${{ needs.release-versions.outputs.node-version }}
+      deno-version: ${{ needs.release-versions.outputs.deno-version }}
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   test-api:
     name: 🔨 Test API (CE)
     needs: [checks, build-gh-docker-publish, release-versions]
@@ -985,12 +1008,20 @@ jobs:
   tests-done:
     name: ✅ Tests Done
     runs-on: ubuntu-24.04-arm
-    needs: [test-guard, checks, test-unit, test-api, test-ui, test-api-ee, test-ui-ee, test-api-livechat, test-api-livechat-ee, test-api-apps-node-ee, test-api-fips, test-api-livechat-fips, test-ui-fips, test-federation-matrix]
+    needs: [test-guard, checks, test-unit, test-api, test-ui, test-api-ee, test-ui-ee, test-api-livechat, test-api-livechat-ee, test-api-apps-node-ee, test-api-fips, test-api-livechat-fips, test-ui-fips, test-federation-matrix, chainstrip-gate]
     if: always() && needs.test-guard.outputs.skip-tests != 'true'
     steps:
       - name: Test finish aggregation
         run: |
           if [[ '${{ needs.checks.result }}' != 'success' ]]; then
+            exit 1
+          fi
+
+          # SKIPPED IS A PASS HERE, and it has to be: the gate only runs when a
+          # PR touches the dependency surface, so on every other PR its result
+          # is 'skipped'. Treating that as a failure would block every PR that
+          # changes no dependency at all - which is most of them.
+          if [[ '${{ needs.chainstrip-gate.result }}' != 'success' && '${{ needs.chainstrip-gate.result }}' != 'skipped' ]]; then
             exit 1
           fi
 

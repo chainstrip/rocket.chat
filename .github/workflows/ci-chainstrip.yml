@@ -1,0 +1,101 @@
+name: Chainstrip Gate
+
+# The light half of the split. Called from ci.yml on pull requests that touch
+# dependency manifests. It RESTORES the baseline that chainstrip-baseline.yml
+# cached on master and runs the no-arg update scan: chainstrip diffs the PR's
+# installed tree against that baseline and classifies every dependency change
+# (new dependency / expanded usage / version bump). A finding inside the block
+# policy (chainstrip.config.json -> update.block) fails the check with a
+# non-zero exit. A reviewer waives a safe block by committing
+# chainstrip-approvals.json to the PR. See CHAINSTRIP.md.
+#
+# It never builds Meteor. The build oracle belongs to the baseline run.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        required: true
+        type: string
+      deno-version:
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: false
+
+permissions: {}
+
+jobs:
+  gate:
+    name: Update Gate
+    # The org runner carries the labels self-hosted,Linux,X64. A repo variable
+    # overrides it so the runner can be changed without editing this file.
+    runs-on: ${{ vars.CHAINSTRIP_LARGE_RUNNER || 'self-hosted' }}
+    # The gate re-validates only the changed dependencies' mapped tests, but one
+    # jest pass over apps/meteor is not cheap.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read # read @chainstrip/cli from GitHub Packages with the ambient token
+      pull-requests: write # the sticky verdict comment (gate-pr-comment.mjs)
+    env:
+      CHAINSTRIP_RUN_ORIGIN: ci
+      TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup NodeJS
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ inputs.node-version }}
+          deno-version: ${{ inputs.deno-version }}
+          cache-modules: true
+          install: true
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # apps/meteor imports the workspace packages from their dist/, so the jest
+      # suite cannot run until turbo has built them. ci.yml gets this from the
+      # packages-build artifact; a workflow that does not depend on that job has
+      # to build them itself.
+      - name: Build workspace packages
+        run: yarn build
+
+      - name: Restore the baseline built on master
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          key: chainstrip-baseline-${{ hashFiles('yarn.lock') }}
+          restore-keys: chainstrip-baseline-
+          path: |
+            .chainstrip/artifacts
+            .chainstrip/extracted-deps
+            .chainstrip/inventory.json
+            .chainstrip/tiers.json
+            .chainstrip/test-impact-map.json
+            .chainstrip/covtrim-report.json
+            .chainstrip/fileprune-report.json
+
+      - uses: ./.github/actions/setup-chainstrip
+        with:
+          version: ${{ vars.CHAINSTRIP_CLI_VERSION || 'latest' }}
+          csbox: ${{ vars.CHAINSTRIP_CSBOX_PACKAGE || '' }}
+          csbox_path: ${{ vars.CHAINSTRIP_CSBOX_PATH }}
+
+      - name: Gate the dependency change
+        run: $CHAINSTRIP update # no-arg scan; non-zero exit on a blocking verdict
+
+      - name: Comment the verdict on the PR # sticky: one comment, updated in place
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/gate-pr-comment.mjs "${{ github.event.pull_request.number }}"
+
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chainstrip-gate-report
+          path: .chainstrip/gate-report.json
+          include-hidden-files: true # .chainstrip is a dot-dir; hidden paths are skipped by default
+          if-no-files-found: ignore
