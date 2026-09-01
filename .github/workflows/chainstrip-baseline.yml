@@ -52,6 +52,30 @@ jobs:
           echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
           echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
 
+      # THIS RUNNER HAS NO yarn ON PATH, and the project's own setup-node
+      # action assumes one. It passes `cache: yarn` to actions/setup-node,
+      # which shells out to `yarn --version` to locate the cache folder, and
+      # that fails before anything else runs. GitHub-hosted images ship a
+      # global yarn; a bare self-hosted runner does not. MEASURED: the first
+      # baseline died here in 4 seconds with "Unable to locate executable
+      # file: yarn".
+      #
+      # So provision node and turn on corepack FIRST. corepack puts a `yarn`
+      # shim on PATH, and .yarnrc.yml pins yarnPath at the committed
+      # .yarn/releases/yarn-4.12.0.cjs, so the shim runs that exact release
+      # and downloads nothing. The project's action then runs unchanged.
+      - name: Provision node for the corepack shim
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: ${{ steps.tools.outputs.node-version }}
+
+      - name: Enable corepack
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          yarn --version
+
       - name: Setup NodeJS
         uses: ./.github/actions/setup-node
         with:
