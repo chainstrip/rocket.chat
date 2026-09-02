@@ -1,4 +1,4 @@
-name: Chainstrip Probe - modules and build cache
+name: Chainstrip Probe - build cache
 
 # A one-off diagnostic, dispatched by hand. It answers three questions the
 # first baseline raised and could not settle from its own reports.
@@ -36,7 +36,7 @@ jobs:
       TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
       BABEL_ENV: production
       VALIDATED: "@opentelemetry/api @react-aria/button @react-aria/dialog @react-aria/focus @react-aria/interactions @react-aria/overlays @react-aria/toolbar @react-aria/utils @react-aria/visually-hidden @react-stately/overlays @rocket.chat/css-in-js @rocket.chat/emitter @rocket.chat/fuselage @rocket.chat/fuselage-hooks @rocket.chat/fuselage-toastbar @rocket.chat/fuselage-tokens @rocket.chat/icons @rocket.chat/layout @rocket.chat/string-helpers @rocket.chat/styled @storybook/react @tanstack/react-query @testing-library/jest-dom bson codemirror cookie cron date-fns date.js debug ejson emojibase emojibase-data hono human-interval i18next i18next-sprintf-postprocessor lodash marked moment moment-timezone node-fetch node-rsa overlayscrollbars overlayscrollbars-react p-limit parseurl path-to-regexp prom-client qs query-string re-resizable react react-aria react-error-boundary react-hook-form react-i18next react-keyed-flatten-children react-virtuoso semver typia zod zustand"
-      DEPS: "@rocket.chat/fuselage-tokens @rocket.chat/icons @storybook/react @tanstack/react-query codemirror ejson emojibase emojibase-data i18next-sprintf-postprocessor marked react-i18next zustand"
+      CANDIDATES: "react-i18next zustand ejson marked"
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -78,115 +78,90 @@ jobs:
       - name: Build workspace packages
         run: yarn build
 
-      - name: 'Q1: nested node_modules census'
+      # ROUND 2 ANSWERED THE MODULE QUESTION AND MIS-ANSWERED THE CACHE ONE.
+      # It broke the CJS entry require.resolve reported, rebuilt warm, and the
+      # build passed in 31s - which reads as a replay. The control refuted it:
+      # the SAME break also passed a COLD build in 37s, so that file is simply
+      # not in the build graph and the probe measured nothing. A probe whose
+      # result has two explanations has not measured anything.
+      #
+      # So stop guessing which file is compiled and MEASURE it. Stamp a unique
+      # marker into every candidate file, build cold, and grep the built bundle:
+      # a marker that appears is proof that file was compiled in. Only then is
+      # breaking it a test of the cache rather than a test of nothing.
+      - name: 'A: stamp markers into every candidate file'
         run: |
-          echo "nested node_modules directories under apps/meteor:"
-          find apps/meteor/node_modules -maxdepth 2 -name package.json 2>/dev/null | wc -l
-          echo
-          printf '%-34s %-8s %-8s\n' DEP ROOT NESTED
-          for d in $DEPS; do
-            r=no; n=no
-            [ -d "node_modules/$d" ] && r=yes
-            [ -d "apps/meteor/node_modules/$d" ] && n=yes
-            printf '%-34s %-8s %-8s\n' "$d" "$r" "$n"
+          set -euo pipefail
+          : > /tmp/stamped.txt
+          for d in $CANDIDATES; do
+            dir=$(cd apps/meteor && node -e "
+              try { const p=require.resolve('$d'); console.log(require('node:path').dirname(p)); } catch (e) {}
+            ")
+            if [ -z "$dir" ]; then
+              echo "skip $d (unresolvable)"
+              continue
+            fi
+            while IFS= read -r f; do
+              id="CSMARK_$(echo "$f" | shasum | cut -c1-12)"
+              cp "$f" "$f.csbak"
+              printf '\n;globalThis[%s] = %s;\n' "\"$id\"" "\"$id\"" >> "$f"
+              echo "$id $f" >> /tmp/stamped.txt
+            done < <(find "$dir" -name '*.js' -not -path '*/node_modules/*' | head -20)
           done
+          echo "stamped $(wc -l < /tmp/stamped.txt) file(s)"
 
-      - name: 'Q2: which copy does node resolve from apps/meteor'
-        working-directory: apps/meteor
-        run: |
-          for d in $DEPS; do
-            node -e "
-              try { console.log(process.argv[1].padEnd(34), require.resolve(process.argv[1])); }
-              catch (e) { console.log(process.argv[1].padEnd(34), 'UNRESOLVABLE', e.code); }
-            " "$d" || true
-          done
-
-      - name: 'Q3a: meteor build, COLD'
-        working-directory: apps/meteor
-        run: |
-          rm -rf .meteor/local
-          s=$SECONDS
-          yarn build:ci > /tmp/cold.log 2>&1 && echo "COLD: pass in $((SECONDS-s))s" || echo "COLD: FAIL in $((SECONDS-s))s"
-          tail -5 /tmp/cold.log
-
-      - name: 'Q3b: meteor build, WARM, nothing changed'
-        working-directory: apps/meteor
-        run: |
-          s=$SECONDS
-          yarn build:ci > /tmp/warm.log 2>&1 && echo "WARM: pass in $((SECONDS-s))s" || echo "WARM: FAIL in $((SECONDS-s))s"
-
-      - name: 'Q3c: meteor build, WARM, after breaking the resolved react-i18next'
+      - name: 'B: COLD build, then find which markers reached the bundle'
         working-directory: apps/meteor
         run: |
           set -euo pipefail
-          target=$(node -e "console.log(require.resolve('react-i18next'))")
-          echo "breaking: $target"
-          cp "$target" /tmp/react-i18next.bak
-          printf '\nthis is not valid javascript (((\n' >> "$target"
+          rm -rf .meteor/local
           s=$SECONDS
-          if yarn build:ci > /tmp/broken.log 2>&1; then
-            echo "RESULT: build PASSED in $((SECONDS-s))s despite a syntax error in the file it compiles."
-            echo "        The cache REPLAYED. Every buildgate verdict on this target is a false pass."
+          if yarn build:ci > /tmp/coldB.log 2>&1; then
+            echo "COLD build: pass in $((SECONDS-s))s"
           else
-            echo "RESULT: build FAILED in $((SECONDS-s))s, as it should. The cache is content-aware"
-            echo "        and the build gate is sound on this target."
-            tail -15 /tmp/broken.log
+            echo "COLD build FAILED"
+            tail -20 /tmp/coldB.log
+            exit 1
           fi
-          cp /tmp/react-i18next.bak "$target"
-          cp /tmp/react-i18next.bak "$target"
+          : > /tmp/compiled.txt
+          while read -r id f; do
+            if grep -rqF "$id" /tmp/dist 2>/dev/null; then echo "$id $f" >> /tmp/compiled.txt; fi
+          done < /tmp/stamped.txt
+          echo "markers that reached the bundle: $(wc -l < /tmp/compiled.txt) of $(wc -l < /tmp/stamped.txt)"
+          cut -d' ' -f2- /tmp/compiled.txt | sed "s#$GITHUB_WORKSPACE/##" | head -10
 
-      # THE CONTROL Q3c LACKED, and without it Q3c proves nothing.
-      # require.resolve gave the CJS entry. Meteor's client build may compile
-      # the ESM one instead, in which case a warm build passing with the CJS
-      # file broken says nothing about caching - the file was simply never
-      # compiled. Breaking it and building COLD separates the two: a cold
-      # failure means the file IS in the build graph, so the warm pass was a
-      # replay. A cold pass means the probe picked the wrong file and the
-      # cache question is still open.
-      - name: 'Q3d: CONTROL - same break, COLD build'
+      - name: 'C: restore the stamps, re-warm, then BREAK a proven-compiled file'
         working-directory: apps/meteor
         run: |
           set -euo pipefail
-          target=$(node -e "console.log(require.resolve('react-i18next'))")
-          cp "$target" /tmp/react-i18next.bak2
-          printf '\nthis is not valid javascript (((\n' >> "$target"
-          rm -rf .meteor/local
-          s=$SECONDS
-          if yarn build:ci > /tmp/coldbroken.log 2>&1; then
-            echo "CONTROL: cold build PASSED in $((SECONDS-s))s with the same break."
-            echo "         So this file is NOT in the build graph, and Q3c proved nothing"
-            echo "         about the cache. The cache question stays OPEN."
-          else
-            echo "CONTROL: cold build FAILED in $((SECONDS-s))s, as it must."
-            echo "         The file IS compiled, so Q3c's warm PASS was a genuine REPLAY."
-            tail -8 /tmp/coldbroken.log
-          fi
-          cp /tmp/react-i18next.bak2 "$target"
+          # Put every stamped file back, so the only change in the decisive step
+          # is the break itself.
+          while read -r _ f; do cp "$f.csbak" "$f"; done < /tmp/stamped.txt
 
-      # BLAST RADIUS. Twelve deps were found resolving to apps/meteor's nested
-      # tree instead of the hoisted root chainstrip overlays, and all twelve
-      # had shipped as `validated`. This asks the same question of all 63.
-      - name: 'Q4: how many validated deps resolve to a NESTED copy'
-        run: |
-          census() { find "$1" -mindepth 1 -maxdepth 1 -type d -name '@*' -printf '%P\n' -o \
-                          -mindepth 1 -maxdepth 1 -type d -printf '%P\n' | sort; }
-          scoped() { find "$1" -mindepth 2 -maxdepth 2 -type d -path '*/@*' -printf '%P\n' | sort; }
-          both=$( { census node_modules; scoped node_modules; } | sort -u > /tmp/a
-                  { census apps/meteor/node_modules; scoped apps/meteor/node_modules; } | sort -u > /tmp/b
-                  comm -12 /tmp/a /tmp/b | wc -l )
-          echo "packages present in BOTH the root and apps/meteor trees: $both"
-          echo
-          nested=0; root=0
-          for d in $VALIDATED; do
-            r=$(cd apps/meteor && node -e "try{console.log(require.resolve('$d'))}catch(e){console.log('UNRESOLVABLE')}" 2>/dev/null || echo UNRESOLVABLE)
-            case "$r" in
-              */apps/meteor/node_modules/*) nested=$((nested+1)); printf 'NESTED  %s\n' "$d";;
-              UNRESOLVABLE)                 printf 'UNRESOLVABLE  %s\n' "$d";;
-              *)                            root=$((root+1));;
-            esac
-          done
-          echo
-          echo "VALIDATED deps resolving to the nested tree: $nested"
-          echo "VALIDATED deps resolving to the hoisted root: $root"
-          echo "(a nested resolution means the overlay chainstrip installed was never loaded,"
-          echo " so that dep's validated verdict describes bytes nobody changed)"
+          if [ ! -s /tmp/compiled.txt ]; then
+            echo "RESULT: NO marker reached the bundle."
+            echo "        None of the candidates is compiled into this build, so the"
+            echo "        cache question cannot be answered with them. It stays OPEN,"
+            echo "        and the next probe needs a different candidate set."
+            exit 0
+          fi
+
+          # Warm the cache with the restored (clean) tree, so the decisive build
+          # differs from its predecessor ONLY by the break.
+          yarn build:ci > /tmp/warmC.log 2>&1 || { echo "warm re-build failed"; tail -20 /tmp/warmC.log; exit 1; }
+
+          target=$(head -1 /tmp/compiled.txt | cut -d' ' -f2-)
+          echo "breaking a PROVEN-compiled file: ${target#"$GITHUB_WORKSPACE/"}"
+          printf '\nthis is not valid javascript (((\n' >> "$target"
+          s=$SECONDS
+          if yarn build:ci > /tmp/brokenC.log 2>&1; then
+            echo "RESULT: the build PASSED in $((SECONDS-s))s with a syntax error in a file"
+            echo "        this same build was just proven to compile."
+            echo "        THE METEOR CACHE REPLAYS. Every buildgate verdict on this"
+            echo "        target is a false pass until chainstrip clears .meteor/local."
+          else
+            echo "RESULT: the build FAILED in $((SECONDS-s))s, as it must."
+            echo "        The cache is content-aware, and the build gate is SOUND here."
+            tail -12 /tmp/brokenC.log
+          fi
+          cp "$target.csbak" "$target"
