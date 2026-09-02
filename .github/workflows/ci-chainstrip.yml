@@ -86,6 +86,16 @@ jobs:
       - name: Build workspace packages
         run: yarn build
 
+      # REFUSE TO MEASURE A TREE THE TESTS DO NOT LOAD. chainstrip writes every
+      # overlay to <target>/node_modules/<name>, and node resolves nested-first,
+      # so a workspace with its own node_modules shadows the overlay entirely.
+      # MEASURED here: 61 of 63 validated dependencies resolved to
+      # apps/meteor/node_modules and zero to the hoisted root, so a whole
+      # 80-minute baseline was hollow and nothing in it said so. Failing loudly
+      # beats publishing numbers that read as evidence.
+      - name: Refuse a shadowed overlay tree
+        run: node .github/scripts/check-overlay-tree.mjs
+
       - name: Restore the baseline built on master
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
