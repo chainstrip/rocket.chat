@@ -66,10 +66,17 @@ if (shadowed.length === 0) {
   process.exit(0);
 }
 
-console.error(`
-STOP. ${shadowed.length} of ${shadowed.length + inTree.length} resolvable dependencies load from a tree
-chainstrip does NOT overlay, so a run here would report validated verdicts about
-bytes nothing loads. That is a false claim, not merely lost yield.
+// REPORT-ONLY SINCE 0.4.4-nested.1, which carries roadmap #30: chainstrip now
+// resolves from the importing file's directory and overlays EVERY copy at the
+// extracted version, so a shadowed tree is handled rather than fatal. This
+// stayed as diagnostics because the shape is worth seeing in the log, and
+// because the baseline's own numbers are what verify the fix - if the deps
+// listed here come back with no coverage again, the hard stop goes back.
+console.log(`
+NOTE. ${shadowed.length} of ${shadowed.length + inTree.length} resolvable dependencies load from a tree that is not
+the hoisted root. That USED to make every verdict here hollow; as of the CLI
+carrying roadmap #30 the overlay follows copies, and this is reported rather
+than refused.
 
 Examples: ${shadowed.slice(0, 6).map((n) => `${n} -> ${req.resolve(n).replace(root + sep, "")}`).join("\n          ")}
 
@@ -78,8 +85,8 @@ Cause on this repository: apps/meteor sets installConfig.hoistingLimits to
 installs that workspace's dependencies into apps/meteor/node_modules, and node
 resolves those first.
 
-This is chainstrip roadmap item 30. Until the tool overlays every resolved copy,
-this target cannot be measured soundly, and the run is refused rather than
-allowed to produce numbers that read as evidence.
+Check the run's own output: these dependencies must come back with coverage and
+with validation that describes the copy they resolve to. If they do not, the
+fix is not working here and this check should hard-stop again.
 `);
-process.exit(1);
+process.exit(0);
