@@ -122,6 +122,16 @@ jobs:
       - name: Build workspace packages
         run: yarn build
 
+      # REFUSE TO MEASURE A TREE THE TESTS DO NOT LOAD. chainstrip writes every
+      # overlay to <target>/node_modules/<name>, and node resolves nested-first,
+      # so a workspace with its own node_modules shadows the overlay entirely.
+      # MEASURED here: 61 of 63 validated dependencies resolved to
+      # apps/meteor/node_modules and zero to the hoisted root, so a whole
+      # 80-minute baseline was hollow and nothing in it said so. Failing loudly
+      # beats publishing numbers that read as evidence.
+      - name: Refuse a shadowed overlay tree
+        run: node .github/scripts/check-overlay-tree.mjs
+
       - uses: ./.github/actions/setup-chainstrip
         with:
           version: ${{ vars.CHAINSTRIP_CLI_VERSION || 'latest' }}
