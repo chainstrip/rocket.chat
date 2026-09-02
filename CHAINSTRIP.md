@@ -59,115 +59,103 @@ them.
   development-mode build skips production-only plugins and gates nothing.
 - **`update.block`** lists the finding classes that fail a pull request.
 
-## RETRACTED: the first baseline measured the wrong tree
+## Verified baseline, 2026-09-02
 
-Run 33562750648 completed on 2026-09-01 and reported 63 validated packages,
-executable bytes down 53.7%, and a green suite under 180 overlays. **Do not
-quote those numbers.** They describe bytes that nothing loaded.
+Run 33607078804 on `@chainstrip/cli@0.4.4-nested.4`, artifact `78a0fb9a29b8f61b`.
+This is the first measurement of this target that describes bytes the tests
+actually load.
 
-chainstrip writes every overlay to `<target>/node_modules/<name>`, and node
-resolves nested-first. `apps/meteor` carries its own `node_modules`, so it
-shadows the hoisted root the overlay was written to. The mapped tests then
-compare stock against stock, find no difference, and each dependency ships
-`validated` having proved nothing.
-
-MEASURED by `chainstrip-probe-modules.yml`, run 33587232923:
-
-| | |
+| Stage | Result |
 |---|---|
-| packages present in BOTH trees | 1,517 |
-| nested packages under `apps/meteor` | 1,304 |
-| validated deps resolving to the NESTED tree | **61 of 63** |
-| validated deps resolving to the hoisted root | **0** |
+| sweep | 74 validated of 215 candidates. Executable bytes 38.8 -> 22.7 MiB, 41.5% removed |
+| buildgate | passed, 3 builds, 0 offenders |
+| fileprune | 65 of 100 accepted, 2,008 files pruned, 41.8 MB removed |
+| fullgate | 265 overlays, 0 failing at baseline, 0 failing with overlays, passed |
+| covtrim | 0 accepted, 3,048 at-risk functions held (1.1 MB) |
+
+### What the earlier run got wrong, and it was retracted
+
+The 2026-09-01 baseline reported 63 validated and a 53.7% cut. Those numbers
+were withdrawn: chainstrip overlaid `<target>/node_modules/<name>` while the
+tests loaded `apps/meteor`'s own copy, so the differential compared stock with
+stock and could not fail. 255 of 255 declared dependencies resolved outside the
+overlaid tree; 61 of 63 validated ones did.
 
 The cause is deliberate and permanent. `apps/meteor/package.json` sets
 `installConfig: { "hoistingLimits": "workspaces" }`, because Meteor cannot use
-yarn's hoisted tree. yarn therefore installs that workspace's dependencies into
-`apps/meteor/node_modules` by design.
+yarn's hoisted tree.
 
-It was visible only by accident. covtrim reports `functionsTotal`, so twelve
-deps with no coverage record stood out. sweep reports nothing that distinguishes
-"validated against the overlay" from "validated against a copy the overlay never
-touched" - so on a target without covtrim, or for a dep it skips, a hollow
-verdict is completely invisible.
+### How this run proves the fix
 
-**This target cannot be measured soundly until chainstrip overlays every
-resolved copy.** That is chainstrip roadmap item 30, which also specifies the
-conservative half that must land first: a dependency whose consumer-resolved
-path is not the overlaid path must not read as `validated`.
+The strongest evidence is not the byte count, it is that **the oracle can now
+fail**. Four dependencies fail their overlays where the old code had ZERO and
+was structurally incapable of having any:
 
-Moving `target` to `apps/meteor` does NOT fix it and was rejected: the workspace
-clone has to be the whole repository, because the member alone cannot resolve
-the hoisted packages or its sibling workspace packages.
+- `react` (211 mapped tests)
+- `@tanstack/react-query` (190)
+- `@rocket.chat/styled` (176)
+- `@rocket.chat/fuselage-toastbar` (4)
+
+`@tanstack/react-query` had shipped as `validated` in the retracted run with no
+coverage at all. Its bundle genuinely breaks the suite.
+
+Coverage attribution moved too: 31 of 43 covtrim dependencies now carry
+coverage, against 26 of 38 before, and deps that reported `functionsTotal: 0`
+while their tests passed now report real figures — `react-i18next` 55%,
+`@storybook/react` 11%, `i18next-sprintf-postprocessor` 29%.
+
+### Three bugs this target found in the fix itself
+
+Each surfaced only because the overlay had widened, and each had a precondition
+the old single-path write never had to meet.
+
+1. **A dangling `bin` symlink.** Replacing a package whose extraction omits its
+   CLI leaves `apps/meteor/node_modules/.bin/<name>` pointing at nothing, and
+   Meteor's builder refuses to walk such a tree. It reverted six deps and failed
+   the build gate. Bin targets are now stashed and restored.
+2. **`@unknown` version on a pruned tree.** A fileprune output carries no
+   `chainstrip-manifest.json`, so the version read as unknown and the
+   conservative fallback named the root copy — which `chart.js` does not have
+   here. The version now comes from the extraction's own `package.json` too.
+3. **Coverage attribution did not follow copies.** `parseCoverageDir`'s
+   workspace-root prefix rule dropped every execution from a member's own
+   `node_modules`, so covtrim was blind on exactly the dependencies the fix had
+   unblocked. `nestedNodeModules` is now passed on every capture path.
+
+## What is still true, and still not measured
+
+1. **The mocha suite is still not traced HERE.** chainstrip gained mocha support
+   (roadmap #29) in the same CLI, but this target's `testCommand` remains
+   jest-only, so about 196 spec files are still unused and 135 of 215
+   candidates come back `no-mapped-tests`. Switching this target to mocha is a
+   separate change, and the ambiguity guard will refuse `yarn testunit` because
+   it names three runners.
+
+2. **The Meteor build cache is content-aware, and the build gate is SOUND.**
+   Settled by probe run 33592323704: breaking `zustand/index.js`, proven
+   compiled into the client bundle, failed the warm build in 25s and the cold
+   build in 30s. The earlier 177s-versus-31s timing gap was ordinary incremental
+   compilation. Two earlier probe rounds concluded "the cache replays" and both
+   were wrong, because their signal proved inclusion rather than compilation.
+
+3. **covtrim still trims nothing, and that part is by design.** Every candidate
+   is at-risk - reachable from the used surface but never executed - and
+   at-risk is held by default. Zero functions are proven dead, because with
+   `target: "."` most dependencies have installed dependents, which forces the
+   reachability roots to all export names.
+
+4. **A dependency installed ONLY in a workspace member still gets no coverage.**
+   The nested byte guard compares against the workspace-root copy, and there is
+   none to compare against. Conservative and documented; closing it needs the
+   guard to compare against the extraction instead.
+
+5. **The e2e stages are not configured**, so `cove2e` contributes no evidence.
 
 ### The guard
 
-`.github/scripts/check-overlay-tree.mjs` runs before chainstrip in both
-workflows. It resolves every dependency `apps/meteor` declares, from
-`apps/meteor`, and fails the run when any of them load from outside the tree
-chainstrip overlays. Until the tool carries this check itself, the pipeline
-refuses to produce numbers rather than producing false ones.
-
-PROVEN on baseline run 33587857628, the first run after the guard landed. It
-stopped before chainstrip started, with:
-
-```
-overlay tree:   /home/actions-runner/_work/rocket.chat/rocket.chat/node_modules/
-consumer:       /home/actions-runner/_work/rocket.chat/rocket.chat/apps/meteor
-resolved in the overlay tree: 0
-resolved ELSEWHERE (shadowed): 255
-
-STOP. 255 of 255 resolvable dependencies load from a tree
-chainstrip does NOT overlay ...
-```
-
-255 of 255 is the whole declared dependency set of `apps/meteor`, which is a
-stronger statement than the 61 of 63 the probe measured over the validated
-subset. Both workflows fail at that step on this repository, by design.
-
-## What the baseline did establish
-
-These stand, because they are about the plumbing rather than the measurement.
-
-1. **jest `projects` and the trace resolver work together.** 63 dependencies
-   carried `testEvidence: traced`, with up to 287 mapped test files each, so
-   `--resolver` reaches both the `client` and `server` projects.
-2. **`yarn run .testunit:jest` forwards chainstrip's flags and paths.**
-3. **The stock suite is green**, recorded as `stockBaseline: passed`.
-4. **The CI shape works end to end** on a self-hosted runner: corepack for yarn,
-   Meteor on PATH without sudo, turbo packages built, CLI installed from GitHub
-   Packages, ~80 minutes for a full run.
-
-## Still open, independent of the retraction
-
-1. **The mocha suite is invisible.** `apps/meteor` runs about 196 spec files
-   under mocha and about 286 under jest, and chainstrip has no mocha tracer.
-   Tracked as roadmap item 29, mechanism measured: mocha's positionals ADD to
-   the config's `spec` rather than filtering it, so per-dependency isolation
-   needs a generated config.
-
-2. **Whether the Meteor build cache replays is UNKNOWN.** A first probe broke the
-   CJS entry of `react-i18next` and the warm build passed in 31s, which looked
-   like a replay. The control refuted it: the same break passed a COLD build in
-   37s, so that file is not in the build graph and the probe measured nothing. A
-   probe whose result has two explanations has not measured anything. Settling it
-   needs a file provably in the graph.
-
-3. **covtrim trimmed nothing, and that part is by design.** Every candidate was
-   at-risk - reachable but never executed - and at-risk is held by default. Zero
-   functions were proven dead, because with `target: "."` most dependencies have
-   installed dependents, which forces reachability roots to all export names.
-
-4. **40% of validated bundles were larger than stock**, 25 of 63, costing 9.2
-   minutes of per-dep validation that buys nothing, because `shipDecision` is
-   consulted only after validation runs. Two are not rounding: `node-fetch`
-   bundles to 8.9x stock and `@testing-library/jest-dom` to 4x.
-
-5. **Development-only packages are in the candidate set** - `@actions/core`,
-   `@babel/preset-env`, `@eslint/js` - which follows from `target: "."`
-   inventorying the whole monorepo.
-
-6. **The e2e stages are not configured**, so `cove2e` contributes no evidence.
+`.github/scripts/check-overlay-tree.mjs` is report-only. It reports the shape
+in the log; the tool now handles it. If these dependencies ever come back with
+no coverage again, the hard stop goes back.
 
 ## Waiving a finding
 
