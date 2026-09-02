@@ -1,17 +1,64 @@
 {
   "target": ".",
   "stateDir": ".chainstrip",
-  "sandbox": { "mode": "enforce", "allowDegraded": true },
-  "testCommand": ["yarn", "run", ".testunit:jest"],
-  "testCwd": "apps/meteor",
-  "testRunner": "jest",
-  "buildCommand": ["yarn", "run", "build:ci"],
+  "sandbox": {
+    "mode": "enforce",
+    "allowDegraded": true
+  },
+  "devPaths": [
+    "apps/uikit-playground",
+    "packages/release-action",
+    "packages/release-changelog",
+    "packages/jest-presets",
+    "packages/storybook-config"
+  ],
+  "suites": [
+    {
+      "name": "jest",
+      "testCommand": [
+        "yarn",
+        "run",
+        ".testunit:jest"
+      ],
+      "testCwd": "apps/meteor",
+      "testRunner": "jest"
+    },
+    {
+      "name": "mocha",
+      "testCommand": [
+        "yarn",
+        "run",
+        ".testunit:server"
+      ],
+      "testCwd": "apps/meteor",
+      "testRunner": "mocha"
+    }
+  ],
+  "buildCommand": [
+    "yarn",
+    "run",
+    "build:ci"
+  ],
   "buildCwd": "apps/meteor",
   "covtoolchain": {
-    "commands": [["yarn", "run", "build:ci"]],
+    "commands": [
+      [
+        "yarn",
+        "run",
+        "build:ci"
+      ]
+    ],
     "cwd": "apps/meteor"
   },
   "update": {
-    "block": ["retained-surface-changed", "validation-regression", "capability-escalation", "manual-review-required", "expanded-usage-vulnerable", "new-dependency", "reachable-cve"]
+    "block": [
+      "retained-surface-changed",
+      "validation-regression",
+      "capability-escalation",
+      "manual-review-required",
+      "expanded-usage-vulnerable",
+      "new-dependency",
+      "reachable-cve"
+    ]
   }
 }
