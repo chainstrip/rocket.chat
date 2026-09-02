@@ -108,8 +108,22 @@ workflows. It resolves every dependency `apps/meteor` declares, from
 chainstrip overlays. Until the tool carries this check itself, the pipeline
 refuses to produce numbers rather than producing false ones.
 
-Expect both workflows to fail at that step on this repository today. That is the
-guard working.
+PROVEN on baseline run 33587857628, the first run after the guard landed. It
+stopped before chainstrip started, with:
+
+```
+overlay tree:   /home/actions-runner/_work/rocket.chat/rocket.chat/node_modules/
+consumer:       /home/actions-runner/_work/rocket.chat/rocket.chat/apps/meteor
+resolved in the overlay tree: 0
+resolved ELSEWHERE (shadowed): 255
+
+STOP. 255 of 255 resolvable dependencies load from a tree
+chainstrip does NOT overlay ...
+```
+
+255 of 255 is the whole declared dependency set of `apps/meteor`, which is a
+stronger statement than the 61 of 63 the probe measured over the validated
+subset. Both workflows fail at that step on this repository, by design.
 
 ## What the baseline did establish
 
