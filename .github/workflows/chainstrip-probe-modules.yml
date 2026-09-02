@@ -106,7 +106,11 @@ jobs:
               cp "$f" "$f.csbak"
               printf '\n;globalThis[%s] = %s;\n' "\"$id\"" "\"$id\"" >> "$f"
               echo "$id $f" >> /tmp/stamped.txt
-            done < <(find "$dir" -name '*.js' -not -path '*/node_modules/*' | head -20)
+            # ANCHORED to the package dir. `-not -path '*/node_modules/*'` excluded
+            # EVERY file, because the package itself lives under node_modules -
+            # measured: "stamped 0 file(s)". Only the package's OWN nested
+            # node_modules is meant to be skipped.
+            done < <(find "$dir" -name '*.js' -not -path "$dir/node_modules/*" | head -20)
           done
           echo "stamped $(wc -l < /tmp/stamped.txt) file(s)"
 
