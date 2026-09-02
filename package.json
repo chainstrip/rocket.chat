@@ -2,6 +2,7 @@
 	"name": "rocket.chat",
 	"version": "8.7.1",
 	"private": true,
+	"chainstripGateProbe": "touches a dependency manifest so the gate path fires",
 	"description": "Rocket.Chat Monorepo",
 	"homepage": "https://github.com/RocketChat/Rocket.Chat#readme",
 	"bugs": {
