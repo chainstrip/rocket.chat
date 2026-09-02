@@ -35,6 +35,7 @@ jobs:
     env:
       TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
       BABEL_ENV: production
+      VALIDATED: "@opentelemetry/api @react-aria/button @react-aria/dialog @react-aria/focus @react-aria/interactions @react-aria/overlays @react-aria/toolbar @react-aria/utils @react-aria/visually-hidden @react-stately/overlays @rocket.chat/css-in-js @rocket.chat/emitter @rocket.chat/fuselage @rocket.chat/fuselage-hooks @rocket.chat/fuselage-toastbar @rocket.chat/fuselage-tokens @rocket.chat/icons @rocket.chat/layout @rocket.chat/string-helpers @rocket.chat/styled @storybook/react @tanstack/react-query @testing-library/jest-dom bson codemirror cookie cron date-fns date.js debug ejson emojibase emojibase-data hono human-interval i18next i18next-sprintf-postprocessor lodash marked moment moment-timezone node-fetch node-rsa overlayscrollbars overlayscrollbars-react p-limit parseurl path-to-regexp prom-client qs query-string re-resizable react react-aria react-error-boundary react-hook-form react-i18next react-keyed-flatten-children react-virtuoso semver typia zod zustand"
       DEPS: "@rocket.chat/fuselage-tokens @rocket.chat/icons @storybook/react @tanstack/react-query codemirror ejson emojibase emojibase-data i18next-sprintf-postprocessor marked react-i18next zustand"
 
     steps:
@@ -132,3 +133,60 @@ jobs:
             tail -15 /tmp/broken.log
           fi
           cp /tmp/react-i18next.bak "$target"
+          cp /tmp/react-i18next.bak "$target"
+
+      # THE CONTROL Q3c LACKED, and without it Q3c proves nothing.
+      # require.resolve gave the CJS entry. Meteor's client build may compile
+      # the ESM one instead, in which case a warm build passing with the CJS
+      # file broken says nothing about caching - the file was simply never
+      # compiled. Breaking it and building COLD separates the two: a cold
+      # failure means the file IS in the build graph, so the warm pass was a
+      # replay. A cold pass means the probe picked the wrong file and the
+      # cache question is still open.
+      - name: 'Q3d: CONTROL - same break, COLD build'
+        working-directory: apps/meteor
+        run: |
+          set -euo pipefail
+          target=$(node -e "console.log(require.resolve('react-i18next'))")
+          cp "$target" /tmp/react-i18next.bak2
+          printf '\nthis is not valid javascript (((\n' >> "$target"
+          rm -rf .meteor/local
+          s=$SECONDS
+          if yarn build:ci > /tmp/coldbroken.log 2>&1; then
+            echo "CONTROL: cold build PASSED in $((SECONDS-s))s with the same break."
+            echo "         So this file is NOT in the build graph, and Q3c proved nothing"
+            echo "         about the cache. The cache question stays OPEN."
+          else
+            echo "CONTROL: cold build FAILED in $((SECONDS-s))s, as it must."
+            echo "         The file IS compiled, so Q3c's warm PASS was a genuine REPLAY."
+            tail -8 /tmp/coldbroken.log
+          fi
+          cp /tmp/react-i18next.bak2 "$target"
+
+      # BLAST RADIUS. Twelve deps were found resolving to apps/meteor's nested
+      # tree instead of the hoisted root chainstrip overlays, and all twelve
+      # had shipped as `validated`. This asks the same question of all 63.
+      - name: 'Q4: how many validated deps resolve to a NESTED copy'
+        run: |
+          census() { find "$1" -mindepth 1 -maxdepth 1 -type d -name '@*' -printf '%P\n' -o \
+                          -mindepth 1 -maxdepth 1 -type d -printf '%P\n' | sort; }
+          scoped() { find "$1" -mindepth 2 -maxdepth 2 -type d -path '*/@*' -printf '%P\n' | sort; }
+          both=$( { census node_modules; scoped node_modules; } | sort -u > /tmp/a
+                  { census apps/meteor/node_modules; scoped apps/meteor/node_modules; } | sort -u > /tmp/b
+                  comm -12 /tmp/a /tmp/b | wc -l )
+          echo "packages present in BOTH the root and apps/meteor trees: $both"
+          echo
+          nested=0; root=0
+          for d in $VALIDATED; do
+            r=$(cd apps/meteor && node -e "try{console.log(require.resolve('$d'))}catch(e){console.log('UNRESOLVABLE')}" 2>/dev/null || echo UNRESOLVABLE)
+            case "$r" in
+              */apps/meteor/node_modules/*) nested=$((nested+1)); printf 'NESTED  %s\n' "$d";;
+              UNRESOLVABLE)                 printf 'UNRESOLVABLE  %s\n' "$d";;
+              *)                            root=$((root+1));;
+            esac
+          done
+          echo
+          echo "VALIDATED deps resolving to the nested tree: $nested"
+          echo "VALIDATED deps resolving to the hoisted root: $root"
+          echo "(a nested resolution means the overlay chainstrip installed was never loaded,"
+          echo " so that dep's validated verdict describes bytes nobody changed)"
