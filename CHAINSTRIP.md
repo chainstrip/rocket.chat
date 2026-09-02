@@ -59,39 +59,90 @@ them.
   development-mode build skips production-only plugins and gates nothing.
 - **`update.block`** lists the finding classes that fail a pull request.
 
-## What is NOT measured yet
+## First baseline, 2026-09-01
+
+Run 33562750648, commit `4a948dc3`, on the self-hosted runner. About 80 minutes.
+
+| Stage | Result |
+|---|---|
+| sweep | 63 validated of 140 candidates. Executable bytes 35.0 -> 16.2 MiB, 53.7% removed |
+| fileprune | 53 accepted, 1,529 files, 33.6 MB removed (86.0 -> 53.9 MiB, 37.3%) |
+| buildgate | passed, 0 offenders, 3 builds - but see the build cache below |
+| fullgate | 180 overlays, 0 failing at baseline, 0 failing with overlays, passed |
+| covtrim | 0 trims |
+
+Largest bundle reductions: `date-fns` 9.5 -> 3.4 MiB, `typia` 4.0 -> 0.1 MiB,
+`moment` 3.6 -> 0.7 MiB, `zod` 3.8 -> 1.8 MiB. Largest pruned tree: `storybook`
+35.0 -> 12.3 MiB.
+
+## What the baseline settled
+
+1. **jest `projects` and the trace resolver work together.** This was the top
+   risk before the first run. 63 dependencies carry `testEvidence: traced`, with
+   up to 287 mapped test files each. `--resolver` reaches both the `client` and
+   `server` projects.
+
+2. **`yarn run .testunit:jest` forwards chainstrip's flags and paths.** Listing
+   and per-file runs both work through the package script, so the project's own
+   `TZ=UTC` and `TS_NODE_COMPILER_OPTIONS` are carried, as intended.
+
+3. **The stock suite is green.** The preflight recorded `stockBaseline: passed`,
+   so no claim in this run is labelled DEGRADED.
+
+## What is NOT measured yet, or not yet trusted
 
 State these when reading any number this pipeline produces.
 
 1. **The mocha suite is invisible.** `apps/meteor` runs about 196 spec files
    under mocha and about 286 under jest. chainstrip supports jest, vitest and
-   `node --test`; it has no mocha tracer, so `testunit`'s mocha halves cannot be
-   used. Dependencies that only mocha tests exercise get no mapped test, so they
-   ship as pinned stock rather than as a rebuilt copy. That is lost reduction,
-   not an unsound claim. Tracked as roadmap item 29, with the mechanism already
-   measured: mocha's positional arguments ADD to the config's `spec` instead of
-   filtering it, so per-dependency isolation needs a generated config.
+   `node --test`; it has no mocha tracer. 75 of the 140 candidates came back
+   `no-mapped-tests`, which is consistent with that. Those ship as pinned stock
+   rather than a rebuilt copy: lost reduction, not an unsound claim. Tracked as
+   roadmap item 29, with the mechanism already measured - mocha's positional
+   arguments ADD to the config's `spec` instead of filtering it, so per-dependency
+   isolation needs a generated config.
 
-2. **The Meteor build cache is not cleared by the tool.** chainstrip clears
-   `.next`, `.nx`, `.angular`, `.turbo`, `.parcel-cache` and
-   `node_modules/.cache` before every oracle build, because a cached replay is a
-   false pass that validates nothing. It does not know about `~/.meteor` or
-   `apps/meteor/.meteor/local`. `actions/checkout` cleans the in-repo one on
-   every run, and `build:ci` already sets `METEOR_DISABLE_OPTIMISTIC_CACHING=1`.
-   Confirm on the first baseline that the oracle builds really do recompile;
-   a build that finishes suspiciously fast is the symptom.
+2. **The build gate's verdict is NOT yet trusted.** The baseline build took 177s
+   and the two overlay builds 33s and 31s. A 5x gap is the cached-replay
+   signature: chainstrip clears `.next`, `.nx`, `.angular`, `.turbo`,
+   `.parcel-cache` and `node_modules/.cache` before every oracle build, and knows
+   nothing about `~/.meteor` or `apps/meteor/.meteor/local`. It is not proof -
+   Meteor keys on file content, unlike nx's task hash, so incremental recompile
+   may be entirely legitimate. `chainstrip-probe-modules.yml` settles it by
+   breaking a file the app imports 892 times and rebuilding warm. Until that
+   probe runs, read `buildgate: passed, 0 offenders` as unproven.
 
-3. **jest `projects` and the trace resolver are unproven together.**
-   `apps/meteor/jest.config.ts` declares two projects, `client` and `server`.
-   chainstrip traces jest by passing `--resolver` on the command line. Whether
-   that reaches each project's configuration has not been tested here. If it
-   does not, trace observes zero packages, and chainstrip hard-stops rather than
-   reporting an empty result as a clean one. That guard is the reason this is a
-   risk to a first run and not a risk to a published number.
+3. **Twelve dependencies produced NO coverage at all**, with `functionsTotal: 0`,
+   while `apps/meteor` imports them heavily - `react-i18next` at 892 sites,
+   `zustand` at 13, `ejson` at 9. Four of the twelve are remapped by
+   `jest.config.ts` to `<rootDir>/node_modules`, which is `apps/meteor`'s OWN
+   nested tree, not the hoisted root chainstrip overlays. If the tests load a
+   nested copy, then both the coverage AND the validation describe bytes that are
+   not the ones chainstrip changed. The same probe answers this, by asking node
+   which copy it resolves from `apps/meteor`.
 
-4. **The e2e stages are not configured.** There is no `e2e` block, so `cove2e`
-   contributes no browser or server execution evidence. Unit tests alone do not
-   execute everything production executes.
+4. **covtrim trimmed nothing, and that part is by design.** Every one of the 26
+   dependencies with candidates reported `all N candidate(s) held: reachable from
+   the used surface but never executed`. That is the at-risk hold, which is the
+   ratified default. Zero functions were proven dead, because on a monorepo with
+   `target: "."` most dependencies have installed dependents, which forces the
+   reachability roots to all export names and makes everything read as reachable.
+   Yield here grows through reachability precision, not through more tests.
+
+5. **40% of validated bundles are larger than stock**, 25 of 63. Those ship as
+   pinned stock, correctly, but `shipDecision` is consulted only AFTER per-dep
+   validation has run: 9.2 minutes of test runs on this target bought nothing.
+   Eight of the 25 are within 2 KB. Two are not rounding at all - `node-fetch`
+   bundles to 8.9x stock and `@testing-library/jest-dom` to 4x, which is an
+   inlining artifact worth its own investigation.
+
+6. **Development-only packages are in the candidate set.** `@actions/core`,
+   `@babel/preset-env`, `@eslint/js` and `@changesets/types` all appear. That
+   follows from `target: "."` inventorying the whole monorepo. It costs time, not
+   soundness.
+
+7. **The e2e stages are not configured.** There is no `e2e` block, so `cove2e`
+   contributes no browser or server execution evidence.
 
 ## Waiving a finding
 

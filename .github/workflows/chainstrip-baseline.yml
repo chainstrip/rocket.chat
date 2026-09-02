@@ -15,6 +15,11 @@ on:
     branches: [master]
     paths-ignore:
       - ".github/workflows/ci-chainstrip.yml"
+      # A one-off probe cannot change what the pipeline measures, and a
+      # needless baseline OCCUPIES the runner for over an hour: on mattermost,
+      # pushing a probe started a full baseline 6 seconds before the probe was
+      # dispatched, and the measurement sat queued behind it.
+      - ".github/workflows/chainstrip-probe-*.yml"
       - ".github/scripts/**"
       - "**.md"
   workflow_dispatch: {}

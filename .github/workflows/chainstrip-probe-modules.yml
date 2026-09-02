@@ -1,0 +1,134 @@
+name: Chainstrip Probe - modules and build cache
+
+# A one-off diagnostic, dispatched by hand. It answers three questions the
+# first baseline raised and could not settle from its own reports.
+#
+#  Q1 Does apps/meteor carry NESTED node_modules copies of the packages
+#     chainstrip overlays at the hoisted root? Twelve deps came back with
+#     functionsTotal 0 - no coverage record at all - while apps/meteor imports
+#     them heavily (react-i18next at 892 sites). Four of the twelve are
+#     remapped by jest to <rootDir>/node_modules, which IS apps/meteor's own.
+#     A dep the tests load from a nested copy is never the copy chainstrip
+#     overlaid, so its validation and its coverage both describe the wrong
+#     bytes.
+#
+#  Q2 Which copy does node actually resolve, asked from apps/meteor.
+#
+#  Q3 Does the Meteor build cache REPLAY? The baseline build took 177s and the
+#     two overlay builds 33s and 31s. A 5x gap is the cached-replay signature,
+#     and chainstrip's clearBuildCaches knows nothing about .meteor/local. The
+#     decisive test is not timing: break the resolved copy of a dep the app
+#     imports 892 times, rebuild warm, and see whether the build notices.
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  probe:
+    name: Probe
+    runs-on: ${{ vars.CHAINSTRIP_LARGE_RUNNER || 'self-hosted' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
+      BABEL_ENV: production
+      DEPS: "@rocket.chat/fuselage-tokens @rocket.chat/icons @storybook/react @tanstack/react-query codemirror ejson emojibase emojibase-data i18next-sprintf-postprocessor marked react-i18next zustand"
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve tool versions
+        id: tools
+        run: |
+          echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
+          echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+
+      - name: Provision node for the corepack shim
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: ${{ steps.tools.outputs.node-version }}
+
+      - name: Enable corepack
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: corepack enable
+
+      - name: Setup NodeJS
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.tools.outputs.node-version }}
+          deno-version: ${{ steps.tools.outputs.deno-version }}
+          cache-modules: true
+          install: true
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install Meteor
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.meteor/meteor" ]; then
+            curl https://install.meteor.com | sed s/--progress-bar/-sL/g | /bin/sh || true
+          fi
+          test -x "$HOME/.meteor/meteor"
+          echo "$HOME/.meteor" >> "$GITHUB_PATH"
+
+      - name: Build workspace packages
+        run: yarn build
+
+      - name: 'Q1: nested node_modules census'
+        run: |
+          echo "nested node_modules directories under apps/meteor:"
+          find apps/meteor/node_modules -maxdepth 2 -name package.json 2>/dev/null | wc -l
+          echo
+          printf '%-34s %-8s %-8s\n' DEP ROOT NESTED
+          for d in $DEPS; do
+            r=no; n=no
+            [ -d "node_modules/$d" ] && r=yes
+            [ -d "apps/meteor/node_modules/$d" ] && n=yes
+            printf '%-34s %-8s %-8s\n' "$d" "$r" "$n"
+          done
+
+      - name: 'Q2: which copy does node resolve from apps/meteor'
+        working-directory: apps/meteor
+        run: |
+          for d in $DEPS; do
+            node -e "
+              try { console.log(process.argv[1].padEnd(34), require.resolve(process.argv[1])); }
+              catch (e) { console.log(process.argv[1].padEnd(34), 'UNRESOLVABLE', e.code); }
+            " "$d" || true
+          done
+
+      - name: 'Q3a: meteor build, COLD'
+        working-directory: apps/meteor
+        run: |
+          rm -rf .meteor/local
+          s=$SECONDS
+          yarn build:ci > /tmp/cold.log 2>&1 && echo "COLD: pass in $((SECONDS-s))s" || echo "COLD: FAIL in $((SECONDS-s))s"
+          tail -5 /tmp/cold.log
+
+      - name: 'Q3b: meteor build, WARM, nothing changed'
+        working-directory: apps/meteor
+        run: |
+          s=$SECONDS
+          yarn build:ci > /tmp/warm.log 2>&1 && echo "WARM: pass in $((SECONDS-s))s" || echo "WARM: FAIL in $((SECONDS-s))s"
+
+      - name: 'Q3c: meteor build, WARM, after breaking the resolved react-i18next'
+        working-directory: apps/meteor
+        run: |
+          set -euo pipefail
+          target=$(node -e "console.log(require.resolve('react-i18next'))")
+          echo "breaking: $target"
+          cp "$target" /tmp/react-i18next.bak
+          printf '\nthis is not valid javascript (((\n' >> "$target"
+          s=$SECONDS
+          if yarn build:ci > /tmp/broken.log 2>&1; then
+            echo "RESULT: build PASSED in $((SECONDS-s))s despite a syntax error in the file it compiles."
+            echo "        The cache REPLAYED. Every buildgate verdict on this target is a false pass."
+          else
+            echo "RESULT: build FAILED in $((SECONDS-s))s, as it should. The cache is content-aware"
+            echo "        and the build gate is sound on this target."
+            tail -15 /tmp/broken.log
+          fi
+          cp /tmp/react-i18next.bak "$target"
