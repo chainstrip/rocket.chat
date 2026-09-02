@@ -128,9 +128,21 @@ jobs:
             exit 1
           fi
           : > /tmp/compiled.txt
+          # WHERE the marker lands decides what it proves. Meteor COMPILES the
+          # client bundle and COPIES server npm modules verbatim, so a marker
+          # under programs/server/npm only proves the file was included - and a
+          # syntax error in a copied file would never fail any build, cached or
+          # not. That is the confound that made rounds 2 and 3 inconclusive.
+          : > /tmp/client.txt
           while read -r id f; do
-            if grep -rqF "$id" /tmp/dist 2>/dev/null; then echo "$id $f" >> /tmp/compiled.txt; fi
+            if grep -rqF "$id" /tmp/dist/bundle/programs/web.browser* 2>/dev/null; then
+              echo "$id $f" >> /tmp/client.txt
+              echo "$id $f" >> /tmp/compiled.txt
+            elif grep -rqF "$id" /tmp/dist 2>/dev/null; then
+              echo "$id $f" >> /tmp/compiled.txt
+            fi
           done < /tmp/stamped.txt
+          echo "of those, in the COMPILED client bundle: $(wc -l < /tmp/client.txt)"
           echo "markers that reached the bundle: $(wc -l < /tmp/compiled.txt) of $(wc -l < /tmp/stamped.txt)"
           cut -d' ' -f2- /tmp/compiled.txt | sed "s#$GITHUB_WORKSPACE/##" | head -10
 
@@ -154,7 +166,15 @@ jobs:
           # differs from its predecessor ONLY by the break.
           yarn build:ci > /tmp/warmC.log 2>&1 || { echo "warm re-build failed"; tail -20 /tmp/warmC.log; exit 1; }
 
-          target=$(head -1 /tmp/compiled.txt | cut -d' ' -f2-)
+          # Prefer a file the CLIENT bundle compiled; fall back to any included
+          # file, and say which, because the two prove different things.
+          if [ -s /tmp/client.txt ]; then
+            target=$(head -1 /tmp/client.txt | cut -d' ' -f2-)
+            echo "target is in the COMPILED client bundle"
+          else
+            target=$(head -1 /tmp/compiled.txt | cut -d' ' -f2-)
+            echo "target is only in the COPIED server tree - a break there may prove nothing"
+          fi
           echo "breaking a PROVEN-compiled file: ${target#"$GITHUB_WORKSPACE/"}"
           printf '\nthis is not valid javascript (((\n' >> "$target"
           s=$SECONDS
@@ -167,5 +187,20 @@ jobs:
             echo "RESULT: the build FAILED in $((SECONDS-s))s, as it must."
             echo "        The cache is content-aware, and the build gate is SOUND here."
             tail -12 /tmp/brokenC.log
+          fi
+
+          # THE CONTROL, which round 3 dropped and round 2 had. A warm PASS only
+          # means "replay" if the SAME break fails a COLD build. If cold passes
+          # too, the build never parses that file and the warm pass proves
+          # nothing - which is exactly how round 2 was refuted.
+          rm -rf .meteor/local
+          s=$SECONDS
+          if yarn build:ci > /tmp/coldbrokenC.log 2>&1; then
+            echo "CONTROL: the COLD build ALSO passed in $((SECONDS-s))s with the same break."
+            echo "         So this file is never parsed by the build, the warm result above"
+            echo "         proves NOTHING, and the cache question stays OPEN."
+          else
+            echo "CONTROL: the COLD build FAILED in $((SECONDS-s))s, as it must."
+            echo "         The file IS parsed, so a warm PASS above is a genuine REPLAY."
           fi
           cp "$target.csbak" "$target"
