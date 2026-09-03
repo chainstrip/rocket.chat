@@ -51,12 +51,6 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Resolve tool versions
-        id: tools
-        run: |
-          echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
-          echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
-
       # THIS RUNNER HAS NO yarn ON PATH, and the project's own setup-node
       # action assumes one. It passes `cache: yarn` to actions/setup-node,
       # which shells out to `yarn --version` to locate the cache folder, and
@@ -69,10 +63,19 @@ jobs:
       # shim on PATH, and .yarnrc.yml pins yarnPath at the committed
       # .yarn/releases/yarn-4.12.0.cjs, so the shim runs that exact release
       # and downloads nothing. The project's action then runs unchanged.
+      # NODE COMES FROM package.json, NOT FROM A NODE THAT IS ALREADY THERE.
+      # This step used to read `engines.node` with `node -p`, which needs the
+      # very thing it is about to install. On a runner that HAS node that is
+      # invisible; on a bare one `node: command not found` fails inside `$( )`,
+      # so the version resolves to EMPTY, this action provisions nothing, and
+      # the job dies two steps later on `corepack: command not found`.
+      # MEASURED on a newly added runner. `node-version-file` reads
+      # `engines.node` out of package.json directly, so the bootstrap needs no
+      # interpreter at all.
       - name: Provision node for the corepack shim
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
-          node-version: ${{ steps.tools.outputs.node-version }}
+          node-version-file: package.json
 
       - name: Enable corepack
         env:
@@ -80,6 +83,14 @@ jobs:
         run: |
           corepack enable
           yarn --version
+
+      # AFTER node exists, so `node -p` is safe here. deno comes from
+      # .tool-versions and never needed node.
+      - name: Resolve tool versions
+        id: tools
+        run: |
+          echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
+          echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
 
       - name: Setup NodeJS
         uses: ./.github/actions/setup-node
