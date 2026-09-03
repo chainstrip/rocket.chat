@@ -32,6 +32,30 @@
       ],
       "testCwd": "apps/meteor",
       "testRunner": "mocha"
+    },
+    {
+      "name": "pkg-gazzodown",
+      "testCommand": [
+        "yarn",
+        "workspace",
+        "@rocket.chat/gazzodown",
+        "run",
+        "testunit"
+      ],
+      "testCwd": "packages/gazzodown",
+      "testRunner": "jest"
+    },
+    {
+      "name": "pkg-message-parser",
+      "testCommand": [
+        "yarn",
+        "workspace",
+        "@rocket.chat/message-parser",
+        "run",
+        "testunit"
+      ],
+      "testCwd": "packages/message-parser",
+      "testRunner": "jest"
     }
   ],
   "buildCommand": [

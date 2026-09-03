@@ -45,33 +45,61 @@ them.
 `chainstrip.config.json` at the repository root:
 
 - **`target` is `.`, not `apps/meteor`.** Yarn 4 runs with
-  `nodeLinker: node-modules` and hoists every dependency to the repository
-  root, so `node_modules` is at `.`. chainstrip overlays into
-  `<target>/node_modules/<name>`, which is the only path it writes.
-- **`testCommand` is `yarn run .testunit:jest`, from `apps/meteor`.** That is
-  the project's own script, so it carries the project's own environment
-  (`TZ=UTC`, `TS_NODE_COMPILER_OPTIONS`). Reducing a test command to a bare
-  runner invocation drops that environment, and the timezone-sensitive tests
-  then fail for a reason that has nothing to do with any dependency.
+  `nodeLinker: node-modules`, but `apps/meteor` sets
+  `installConfig.hoistingLimits: "workspaces"`, because Meteor cannot use
+  yarn's hoisted tree. So that member installs its own 1,304 dependencies and
+  node resolves them nested-first. chainstrip writes EVERY installed copy at
+  the extracted version, not only the root one.
+- **Four suites, and each names the project's own script.** `jest` and `mocha`
+  both run from `apps/meteor`; `pkg-gazzodown` and `pkg-message-parser` run
+  from their own packages. A script carries the project's own environment
+  (`TZ=UTC`, `TS_NODE_COMPILER_OPTIONS`), and reducing a test command to a bare
+  runner invocation drops it - after which the timezone-sensitive tests fail
+  for a reason that has nothing to do with any dependency.
+
+  One command may not name two runners: `yarn testunit` chains three, and
+  chainstrip refuses it rather than tracing one runner while validating
+  against another. Two suites may share a `testCwd`, which is why a file that
+  both would collect is assigned by configuration order and never by probing
+  the filesystem.
+- **`devPaths` names what is not the product.** `apps/uikit-playground` is a
+  playground, and four `packages/*` entries are release and Storybook tooling.
+  Their dependencies are not shippable and no suite covers them, so counting
+  them made every percentage in the report wrong. The paths are still scanned,
+  so `drift` still reports a new dependency arriving in one of them.
 - **`buildCommand` is `yarn run build:ci`, from `apps/meteor`.** That is
   `meteor build`. The baseline workflow sets `BABEL_ENV=production`, matching
   what `.github/actions/meteor-build` passes for a production build. A
   development-mode build skips production-only plugins and gates nothing.
 - **`update.block`** lists the finding classes that fail a pull request.
 
-## Verified baseline, 2026-09-02
+## Verified baseline, 2026-09-03
 
-Run 33607078804 on `@chainstrip/cli@0.4.4-nested.4`, artifact `78a0fb9a29b8f61b`.
-This is the first measurement of this target that describes bytes the tests
-actually load.
+Run 33731088496 on `@chainstrip/cli@0.4.4-nested.8`, artifact `156e4301955ab985`.
 
 | Stage | Result |
 |---|---|
-| sweep | 74 validated of 215 candidates. Executable bytes 38.8 -> 22.7 MiB, 41.5% removed |
+| sweep | 67 validated of 180 candidates. Bytes 113.5 -> 19.0 MB, 83.3% removed |
 | buildgate | passed, 3 builds, 0 offenders |
-| fileprune | 65 of 100 accepted, 2,008 files pruned, 41.8 MB removed |
-| fullgate | 265 overlays, 0 failing at baseline, 0 failing with overlays, passed |
-| covtrim | 0 accepted, 3,048 at-risk functions held (1.1 MB) |
+| fileprune | 65 of 128 accepted, 1,949 files pruned, 37.2 MB removed |
+| fullgate | 169 overlays, 0 failing at baseline, 0 failing with overlays, passed |
+| covtrim | 0 accepted, 3,256 at-risk functions held (1.2 MB) |
+| artifact | 169 extracted + 34 pinned, store 27.8 MB |
+
+The other 113 candidates: 73 `larger-than-stock`, 37 `no-mapped-tests`,
+2 `extract-failed`, 1 `overlay-failed`. So 67 of the 107 candidates that can
+ship a bundle validated, which is 63%.
+
+`larger-than-stock` is a decision, not a failure. The bundle came out bigger
+than the package it replaces, so the package ships instead - pinned, or pruned
+by fileprune. chainstrip spends no validation on those, which is why the
+candidate count and the validated count are read together.
+
+### The earlier baseline, 2026-09-02
+
+Run 33607078804 on `nested.4`, artifact `78a0fb9a29b8f61b`: 74 validated of
+215 candidates, 41.5% of executable bytes. That run counted oversized bundles
+as validated and ran no mocha suite, so it is superseded rather than compared.
 
 ### What the earlier run got wrong, and it was retracted
 
@@ -124,12 +152,25 @@ the old single-path write never had to meet.
 
 ## What is still true, and still not measured
 
-1. **The mocha suite is still not traced HERE.** chainstrip gained mocha support
-   (roadmap #29) in the same CLI, but this target's `testCommand` remains
-   jest-only, so about 196 spec files are still unused and 135 of 215
-   candidates come back `no-mapped-tests`. Switching this target to mocha is a
-   separate change, and the ambiguity guard will refuse `yarn testunit` because
-   it names three runners.
+1. **Adding more package suites buys almost nothing, and that is measured.**
+   The `jest` and `mocha` suites both run in `apps/meteor`. Of the 37
+   `no-mapped-tests` dependencies, 24 (7.14 MiB of 10.9 MiB) are imported by
+   `apps/meteor` code, so they already sit inside both suites' scope. They are
+   unmapped because no unit test names them: all 37 were checked against every
+   `*.spec.*` and `*.test.*` file in the repository and two matched, both
+   substring coincidences.
+
+   The rest divide as follows. `packages/gazzodown` holds one (`katex`,
+   2.51 MiB) and `packages/message-parser` holds one (`tinybench`, 0.11 MiB);
+   both have jest suites, and both are configured. `packages/livechat` holds
+   six (0.72 MiB) and `ee/packages/media-calls` holds one, and NEITHER ships a
+   test file, so no suite can reach them. Four have no import site at all.
+
+   Six package suites that an earlier plan named - `cas-validate`,
+   `server-fetch`, `ui-client`, `federation-matrix`, `ddp-streamer`,
+   `omnichannel-services` - map ZERO unmapped dependencies and are therefore
+   not configured. The remaining levers for those 24 dependencies are witness
+   probes and e2e evidence, not another suite.
 
 2. **The Meteor build cache is content-aware, and the build gate is SOUND.**
    Settled by probe run 33592323704: breaking `zustand/index.js`, proven
