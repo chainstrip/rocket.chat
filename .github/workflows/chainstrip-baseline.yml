@@ -11,17 +11,20 @@ name: Chainstrip Baseline
 # change to this file DOES change the run.
 
 on:
-  push:
-    branches: [master]
-    paths-ignore:
-      - ".github/workflows/ci-chainstrip.yml"
-      # A one-off probe cannot change what the pipeline measures, and a
-      # needless baseline OCCUPIES the runner for over an hour: on mattermost,
-      # pushing a probe started a full baseline 6 seconds before the probe was
-      # dispatched, and the measurement sat queued behind it.
-      - ".github/workflows/chainstrip-probe-*.yml"
-      - ".github/scripts/**"
-      - "**.md"
+  # DISPATCH ONLY. A baseline is a MEASUREMENT that occupies a runner for an
+  # hour or more, and nothing about a push tells you a measurement is wanted
+  # now. The `paths-ignore` lists this replaces were a partial fix for the same
+  # problem — they grew after a probe push started a full baseline 6 seconds
+  # before the probe was dispatched, leaving the measurement queued behind it —
+  # but they could not cover the case that kept recurring: editing THIS file.
+  # Every workflow fix (the artifact upload, the corepack ordering, the node
+  # bootstrap) started an unwanted baseline, twice landing two runs of the same
+  # target at once.
+  #
+  # The old argument for keeping the push trigger was that a change to this file
+  # DOES change the run. True, and it does not follow that the run should start
+  # by itself: the person editing it is the person who knows whether a fresh
+  # measurement is worth an hour of the box.
   workflow_dispatch: {}
 
 concurrency:
