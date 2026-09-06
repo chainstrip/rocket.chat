@@ -168,6 +168,15 @@ jobs:
       # in this job consumes it, so no test file is added here and the rerun that
       # would follow new tests is never necessary in CI. The prompt ships in the
       # report artifact instead.
+      # The prompt ranks CVE-bearing deps first ONLY when a reachability report
+      # exists; without one it says so and ranks by coverage alone (measured on the
+      # first rocket.chat run: "no reachability report - CVE prioritization is
+      # MISSING"). reachability is the OSV rescan over the artifact just packed -
+      # about a minute, network to OSV, report-only. It degrades to an empty
+      # advisory set offline and the prompt still writes.
+      - name: reachability (CVE rescan for the prompt's ranking)
+        run: $CHAINSTRIP reachability
+
       - name: coverage prompt
         run: $CHAINSTRIP coverage --prompt
 
