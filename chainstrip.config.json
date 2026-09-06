@@ -84,5 +84,14 @@
       "new-dependency",
       "reachable-cve"
     ]
+  },
+  "witness": {
+    "llm": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "apiKeyEnv": "ANTHROPIC_API_KEY"
+    },
+    "suite": "mocha",
+    "probeDir": "apps/meteor/.chainstrip-probes"
   }
 }
