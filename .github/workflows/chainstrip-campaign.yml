@@ -89,6 +89,23 @@ jobs:
       # MEASURED on a newly added runner. `node-version-file` reads
       # `engines.node` out of package.json directly, so the bootstrap needs no
       # interpreter at all.
+      # THE LLM KEY IS CHECKED FIRST, IN SECONDS. MEASURED 2026-09-06: an invalid
+      # ANTHROPIC_API_KEY was discovered by the witness campaign step - after a
+      # 3h42m baseline on mattermost and a 1h34m one on rocket.chat - as
+      # "401 authentication_error: API key is invalid". One GET to /v1/models
+      # answers the same question before any setup runs. An ABSENT key is not an
+      # error here (the campaign step skips by name); a PRESENT key that the API
+      # rejects fails the job now, with the reason, instead of hours later.
+      - name: check the LLM key before spending anything
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then echo "no ANTHROPIC_API_KEY secret - the witness campaign will be skipped by name"; exit 0; fi
+          code=$(curl -sS -o /tmp/llm-key-check.json -w '%{http_code}' https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" || echo 000)
+          if [ "$code" = "200" ]; then echo "ANTHROPIC_API_KEY accepted (HTTP 200)"; exit 0; fi
+          echo "::error title=LLM key rejected::ANTHROPIC_API_KEY is present but the API answered HTTP $code: $(head -c 300 /tmp/llm-key-check.json). Re-set the org secret (gh secret set ANTHROPIC_API_KEY --org chainstrip --visibility all) and re-dispatch."
+          exit 1
+
       - name: Provision node for the corepack shim
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -239,7 +256,19 @@ jobs:
             echo "accepted=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          $CHAINSTRIP witness --campaign
+          # --allow-stale-targets, BECAUSE THIS JOB CHECKS OUT WHATEVER THE BRANCH HEAD
+          # IS. The sweep on this runner ran at the baseline's commit; a workflow-only
+          # commit since then moves HEAD, and witness's stale-targets guard then
+          # hard-stops (MEASURED: mattermost campaign 34044944820, sweep at 267ba078,
+          # HEAD at a3ce9700 - the campaign workflow itself). The guard exists for
+          # TESTS added since the sweep, so the paths that changed are printed here
+          # for the record, and the campaign proceeds labelled DEGRADED by the CLI.
+          sweep_state=$(node -e "console.log(require('./.chainstrip/sweep-report.json').targetStateId||'')")
+          if [ -n "$sweep_state" ] && [ "$sweep_state" != "$(git rev-parse HEAD)" ]; then
+            echo "sweep ran at $sweep_state; HEAD is $(git rev-parse HEAD); paths changed since:"
+            git diff --stat "$sweep_state" HEAD 2>/dev/null | tail -20 || echo "  (the sweep commit is not in this checkout's history)"
+          fi
+          $CHAINSTRIP witness --campaign --allow-stale-targets
           accepted="$(node -e "const r=require('./.chainstrip/witness-report.json');console.log((r.probes||[]).filter(p=>p.verdict==='accepted').length)")"
           echo "accepted probes: $accepted"
           echo "accepted=$accepted" >> "$GITHUB_OUTPUT"
