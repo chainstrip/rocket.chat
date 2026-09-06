@@ -1,0 +1,259 @@
+name: chainstrip campaign (on a runner holding a finished baseline)
+
+# THE WITNESS CAMPAIGN WITHOUT THE HOURS-LONG RUN IN FRONT OF IT. A campaign
+# needs only what a finished `chainstrip run` leaves in `.chainstrip` - the
+# sweep report, the extracted deps, the impact map - and on a self-hosted
+# runner that state is still on disk after the baseline job, until the next
+# checkout's `git clean -ffdx` removes it. So this job checks out WITHOUT
+# cleaning and must land on the runner that ran the baseline: pass its label
+# as `runner` (a label added to that one runner; `rc-state` here). Landing
+# anywhere else finds no state and stops before spending anything.
+#
+# MEASURED 2026-09-06: the first campaigns were dispatched as full baselines
+# because the state had not been kept, at 3h42m (mattermost) and 1h34m
+# (rocket.chat) of runner time per campaign. This is the cheaper door.
+#
+# Same concurrency group as the baseline, so the two never overlap on a repo.
+
+on:
+  # DISPATCH ONLY. A baseline is a MEASUREMENT that occupies a runner for an
+  # hour or more, and nothing about a push tells you a measurement is wanted
+  # now. The `paths-ignore` lists this replaces were a partial fix for the same
+  # problem — they grew after a probe push started a full baseline 6 seconds
+  # before the probe was dispatched, leaving the measurement queued behind it —
+  # but they could not cover the case that kept recurring: editing THIS file.
+  # Every workflow fix (the artifact upload, the corepack ordering, the node
+  # bootstrap) started an unwanted baseline, twice landing two runs of the same
+  # target at once.
+  #
+  # The old argument for keeping the push trigger was that a change to this file
+  # DOES change the run. True, and it does not follow that the run should start
+  # by itself: the person editing it is the person who knows whether a fresh
+  # measurement is worth an hour of the box.
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runs-on label of the runner holding the finished baseline (e.g. rc-state)"
+        required: true
+        default: "rc-state"
+
+concurrency:
+  group: chainstrip-baseline
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  baseline:
+    name: Baseline (full run)
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 420 # the campaign and one rerun
+    permissions:
+      contents: read
+      packages: read # read @chainstrip/cli from GitHub Packages with the ambient token
+    env:
+      CHAINSTRIP_RUN_ORIGIN: ci
+      TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
+      # apps/meteor's own build:ci sets METEOR_DEBUG_BUILD and disables
+      # optimistic caching. BABEL_ENV mirrors what .github/actions/meteor-build
+      # passes for a production build, so the build oracle compiles the same way
+      # the release pipeline does. A dev-mode build skips production-only plugins
+      # and gates nothing.
+      BABEL_ENV: production
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # KEEP THE BASELINE'S STATE. The default cleans untracked files, and
+          # .chainstrip is untracked - that is the whole point of this job.
+          clean: false
+
+      # THIS RUNNER HAS NO yarn ON PATH, and the project's own setup-node
+      # action assumes one. It passes `cache: yarn` to actions/setup-node,
+      # which shells out to `yarn --version` to locate the cache folder, and
+      # that fails before anything else runs. GitHub-hosted images ship a
+      # global yarn; a bare self-hosted runner does not. MEASURED: the first
+      # baseline died here in 4 seconds with "Unable to locate executable
+      # file: yarn".
+      #
+      # So provision node and turn on corepack FIRST. corepack puts a `yarn`
+      # shim on PATH, and .yarnrc.yml pins yarnPath at the committed
+      # .yarn/releases/yarn-4.12.0.cjs, so the shim runs that exact release
+      # and downloads nothing. The project's action then runs unchanged.
+      # NODE COMES FROM package.json, NOT FROM A NODE THAT IS ALREADY THERE.
+      # This step used to read `engines.node` with `node -p`, which needs the
+      # very thing it is about to install. On a runner that HAS node that is
+      # invisible; on a bare one `node: command not found` fails inside `$( )`,
+      # so the version resolves to EMPTY, this action provisions nothing, and
+      # the job dies two steps later on `corepack: command not found`.
+      # MEASURED on a newly added runner. `node-version-file` reads
+      # `engines.node` out of package.json directly, so the bootstrap needs no
+      # interpreter at all.
+      - name: Provision node for the corepack shim
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version-file: package.json
+
+      - name: Enable corepack
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          yarn --version
+
+      # AFTER node exists, so `node -p` is safe here. deno comes from
+      # .tool-versions and never needed node.
+      - name: Resolve tool versions
+        id: tools
+        run: |
+          echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
+          echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup NodeJS
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.tools.outputs.node-version }}
+          deno-version: ${{ steps.tools.outputs.deno-version }}
+          cache-modules: true
+          install: true
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # chainstrip's buildCommand is `yarn build:ci` inside apps/meteor, which is
+      # `meteor build`. The tool must be on PATH before the run starts, or the
+      # build gate reports every validated dependency as a build failure.
+      # NO PASSWORDLESS sudo ON THIS RUNNER. The installer unpacks into
+      # ~/.meteor and then tries to `sudo cp` a launcher into /usr/local/bin,
+      # which fails with "a terminal is required to read the password". It then
+      # exits ZERO having told you the remedy itself: put $HOME/.meteor on PATH.
+      # MEASURED: the second baseline died here, `meteor: command not found`,
+      # exit 127. The project's own meteor-build action does the sudo cp, which
+      # works on a GitHub-hosted image and cannot work here.
+      #
+      # The launcher self-manages its version: run inside apps/meteor it reads
+      # .meteor/release and fetches METEOR@3.4.1, whatever the bootstrap
+      # installer happened to download.
+      - name: Install Meteor
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.meteor/meteor" ]; then
+            curl https://install.meteor.com | sed s/--progress-bar/-sL/g | /bin/sh || true
+          fi
+          test -x "$HOME/.meteor/meteor"
+          echo "$HOME/.meteor" >> "$GITHUB_PATH"
+
+      # A SEPARATE STEP, because GITHUB_PATH only takes effect in later ones.
+      - name: Verify Meteor
+        run: meteor --version
+
+      # apps/meteor imports the workspace packages from their dist/, so nothing
+      # runs until turbo has built them.
+      - name: Build workspace packages
+        run: yarn build
+
+      # REFUSE TO MEASURE A TREE THE TESTS DO NOT LOAD. chainstrip writes every
+      # overlay to <target>/node_modules/<name>, and node resolves nested-first,
+      # so a workspace with its own node_modules shadows the overlay entirely.
+      # MEASURED here: 61 of 63 validated dependencies resolved to
+      # apps/meteor/node_modules and zero to the hoisted root, so a whole
+      # 80-minute baseline was hollow and nothing in it said so. Failing loudly
+      # beats publishing numbers that read as evidence.
+      - name: Refuse a shadowed overlay tree
+        run: node .github/scripts/check-overlay-tree.mjs
+
+      - uses: ./.github/actions/setup-chainstrip
+        with:
+          version: ${{ vars.CHAINSTRIP_CLI_VERSION || 'latest' }}
+          # chainstrip.config.json asks for `"sandbox": {"mode": "enforce"}` with
+          # allowDegraded, so a missing launcher degrades and says so rather than
+          # refusing. Set CHAINSTRIP_CSBOX_PACKAGE (or _PATH on this runner) to
+          # contain the dependency code chainstrip executes.
+          csbox: ${{ vars.CHAINSTRIP_CSBOX_PACKAGE || '' }}
+          csbox_path: ${{ vars.CHAINSTRIP_CSBOX_PATH }}
+
+      - name: the finished baseline this runner holds
+        run: |
+          for f in .chainstrip/sweep-report.json .chainstrip/covtrim-report.json .chainstrip/test-impact-map.json .chainstrip/inventory.json; do
+            [ -f "$f" ] || { echo "::error::$f is missing - this runner ($RUNNER_NAME) holds no finished baseline; dispatch with the label of the runner that ran it"; exit 1; }
+          done
+          [ -d .chainstrip/extracted-deps ] || { echo "::error::.chainstrip/extracted-deps is missing on $RUNNER_NAME"; exit 1; }
+          node -e "const s=require('./.chainstrip/sweep-report.json');console.log('baseline on '+process.env.RUNNER_NAME+': sweep '+s.generatedAt+', tool '+(s.toolVersion||'?')+', counts '+JSON.stringify(s.counts))"
+
+      # WHAT FOLLOWS THE RUN, in the order the operating model names them:
+      # coverage --prompt, witness campaign, rerun. Each rerun is conditional and
+      # says why it ran or did not.
+      #
+      # `coverage --prompt` writes the test-writing worklist
+      # (.chainstrip/coverage-prompt.md) for a person or an agent session. Nothing
+      # in this job consumes it, so no test file is added here and the rerun that
+      # would follow new tests is never necessary in CI. The prompt ships in the
+      # report artifact instead.
+
+      # The campaign is the LLM-driven evidence gatherer. Its key lives in the repo
+      # secret ANTHROPIC_API_KEY; the config's witness.llm.apiKeyEnv names it and
+      # the key is never in config. A missing secret is reported, not papered
+      # over: the step is skipped by name, and the rerun below has nothing to act on.
+      - name: witness campaign
+        id: witness
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::warning title=witness campaign skipped::repo secret ANTHROPIC_API_KEY is not set (witness.llm.apiKeyEnv names it). Add it with: gh secret set ANTHROPIC_API_KEY -R ${{ github.repository }}, then re-dispatch."
+            echo "accepted=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          $CHAINSTRIP witness --campaign
+          accepted="$(node -e "const r=require('./.chainstrip/witness-report.json');console.log((r.probes||[]).filter(p=>p.verdict==='accepted').length)")"
+          echo "accepted probes: $accepted"
+          echo "accepted=$accepted" >> "$GITHUB_OUTPUT"
+
+      # A rerun is necessary exactly when the campaign accepted a probe. An accepted
+      # probe joins per-dep validation only on the NEXT sweep - that is what turns a
+      # no-mapped-tests dep into a validated extraction - and covtrim unions the
+      # witness capture on that run. Zero accepted probes change nothing, so the
+      # rerun is skipped. trace auto-skips on a current test-impact map.
+      - name: rerun with the witness evidence
+        if: steps.witness.outputs.accepted != 'skipped' && steps.witness.outputs.accepted != '0'
+        run: $CHAINSTRIP run
+
+      # The prompt ranks CVE-bearing deps first ONLY when a reachability report
+      # exists; without one it says so and ranks by coverage alone (measured on the
+      # first rocket.chat run: "no reachability report - CVE prioritization is
+      # MISSING"). reachability is the OSV rescan over the artifact just packed -
+      # about a minute, network to OSV, report-only. It degrades to an empty
+      # advisory set offline and the prompt still writes.
+      - name: reachability (CVE rescan for the prompt's ranking)
+        run: $CHAINSTRIP reachability
+
+      - name: coverage prompt
+        run: $CHAINSTRIP coverage --prompt
+
+      - name: Cache the gate baseline
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          key: chainstrip-baseline-${{ hashFiles('yarn.lock') }}
+          # exactly the set the gate reads - NOT .chainstrip/workspaces|bundles|runs
+          path: |
+            .chainstrip/artifacts
+            .chainstrip/extracted-deps
+            .chainstrip/inventory.json
+            .chainstrip/tiers.json
+            .chainstrip/test-impact-map.json
+            .chainstrip/covtrim-report.json
+            .chainstrip/fileprune-report.json
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chainstrip-baseline-report
+          path: |
+            .chainstrip/*-report.json
+            .chainstrip/coverage-prompt.md
+            .chainstrip/witness-*.json
+            .chainstrip/witness-prompt.md
+          # .chainstrip is a DOT-directory and the action skips hidden paths by
+          # default: without this the artifact uploads zero files and the step
+          # still reports success.
+          include-hidden-files: true
+          if-no-files-found: ignore
