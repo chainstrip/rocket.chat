@@ -109,6 +109,43 @@ jobs:
           echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
           echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
 
+      # NO `unzip` ON EVERY RUNNER, AND NO ROOT TO INSTALL ONE. setup-deno (inside
+      # the project's own Setup NodeJS action) unpacks the Deno release with
+      # @actions/tool-cache, which shells out to `unzip -o [-q] <zip>` in the
+      # destination directory and needs the binary on PATH. MEASURED on builder-0
+      # (run 34035675036): "Unable to locate executable file: unzip", four minutes
+      # in. builder-1 has unzip, so the two earlier baselines never met this.
+      #
+      # The shim covers exactly that call - one zip, extracted into the cwd or
+      # `-d DIR` - and restores the unix mode bits zipfile keeps in
+      # external_attr, or the deno binary would land non-executable. It is only
+      # put on PATH when the real unzip is absent; `apt-get install unzip` on the
+      # runner retires it.
+      - name: unzip shim (no-root runners)
+        run: |
+          if command -v unzip >/dev/null 2>&1; then echo "unzip present: $(command -v unzip)"; exit 0; fi
+          mkdir -p "$RUNNER_TEMP/unzip-shim"
+          cat > "$RUNNER_TEMP/unzip-shim/unzip" <<'SH'
+          #!/usr/bin/env bash
+          # minimal unzip for @actions/tool-cache: unzip [-o] [-q] FILE [-d DIR]
+          dest="."; file=""
+          while [ $# -gt 0 ]; do case "$1" in -d) dest="$2"; shift 2;; -*) shift;; *) file="$1"; shift;; esac; done
+          [ -n "$file" ] || { echo "unzip shim: no archive given" >&2; exit 2; }
+          python3 - "$file" "$dest" <<'PY'
+          import os, sys, zipfile
+          src, dest = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(src) as z:
+              for info in z.infolist():
+                  out = z.extract(info, dest)
+                  mode = (info.external_attr >> 16) & 0o777
+                  if mode and not info.is_dir():
+                      os.chmod(out, mode)
+          PY
+          SH
+          chmod +x "$RUNNER_TEMP/unzip-shim/unzip"
+          echo "$RUNNER_TEMP/unzip-shim" >> "$GITHUB_PATH"
+          echo "unzip absent on $RUNNER_NAME - python3 shim on PATH for the next steps"
+
       - name: Setup NodeJS
         uses: ./.github/actions/setup-node
         with:
