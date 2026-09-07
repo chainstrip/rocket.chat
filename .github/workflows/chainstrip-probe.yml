@@ -1,0 +1,178 @@
+name: chainstrip probe (a script on the runner holding the state)
+
+# ONE SCRIPT ON THE RUNNER THAT HOLDS A FINISHED OR FAILED BASELINE'S STATE,
+# with the project installed and the same tools the baseline gets (node, yarn,
+# deno, meteor) - and nothing else. It exists so a question about a run can be
+# answered in minutes on the bytes that produced it, instead of by re-running
+# hours to reach the same point. Checkout keeps untracked files (`.chainstrip`
+# is untracked). Pass the label of the runner holding the state; landing
+# elsewhere finds none. Same shape as chainstrip/cal.diy's and
+# chainstrip/mattermost's chainstrip-probe.yml.
+#
+# Same concurrency group as the baseline, so a probe never runs beside one.
+
+on:
+  # DISPATCH ONLY, for the reason chainstrip-campaign.yml gives: nothing about
+  # a push says a measurement is wanted now.
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runs-on label of the runner holding the state (e.g. rc-state)"
+        required: true
+        default: "rc-state"
+      script:
+        description: "bash script to run in the checkout (multi-line)"
+        required: true
+        default: "ls -la .chainstrip"
+
+concurrency:
+  group: chainstrip-baseline
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  probe:
+    name: probe
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: read # read @chainstrip/cli from GitHub Packages with the ambient token
+    env:
+      CHAINSTRIP_RUN_ORIGIN: ci
+      TOOL_NODE_FLAGS: ${{ vars.TOOL_NODE_FLAGS }}
+      # apps/meteor's own build:ci sets METEOR_DEBUG_BUILD and disables
+      # optimistic caching. BABEL_ENV mirrors what .github/actions/meteor-build
+      # passes for a production build, so the build oracle compiles the same way
+      # the release pipeline does. A dev-mode build skips production-only plugins
+      # and gates nothing.
+      BABEL_ENV: production
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # KEEP THE BASELINE'S STATE. The default cleans untracked files, and
+          # .chainstrip is untracked - that is the whole point of this job.
+          clean: false
+
+      # THIS RUNNER HAS NO yarn ON PATH, and the project's own setup-node
+      # action assumes one. It passes `cache: yarn` to actions/setup-node,
+      # which shells out to `yarn --version` to locate the cache folder, and
+      # that fails before anything else runs. GitHub-hosted images ship a
+      # global yarn; a bare self-hosted runner does not. MEASURED: the first
+      # baseline died here in 4 seconds with "Unable to locate executable
+      # file: yarn".
+      #
+      # So provision node and turn on corepack FIRST. corepack puts a `yarn`
+      # shim on PATH, and .yarnrc.yml pins yarnPath at the committed
+      # .yarn/releases/yarn-4.12.0.cjs, so the shim runs that exact release
+      # and downloads nothing. The project's action then runs unchanged.
+      # NODE COMES FROM package.json, NOT FROM A NODE THAT IS ALREADY THERE.
+      # This step used to read `engines.node` with `node -p`, which needs the
+      # very thing it is about to install. On a runner that HAS node that is
+      # invisible; on a bare one `node: command not found` fails inside `$( )`,
+      # so the version resolves to EMPTY, this action provisions nothing, and
+      # the job dies two steps later on `corepack: command not found`.
+      # MEASURED on a newly added runner. `node-version-file` reads
+      # `engines.node` out of package.json directly, so the bootstrap needs no
+      # interpreter at all.
+      - name: Provision node for the corepack shim
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version-file: package.json
+
+      - name: Enable corepack
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          yarn --version
+
+      # AFTER node exists, so `node -p` is safe here. deno comes from
+      # .tool-versions and never needed node.
+      - name: Resolve tool versions
+        id: tools
+        run: |
+          echo "node-version=$(node -p "require('./package.json').engines.node")" >> "$GITHUB_OUTPUT"
+          echo "deno-version=$(awk '$1=="deno"{ print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+
+      # NO `unzip` ON EVERY RUNNER, AND NO ROOT TO INSTALL ONE. setup-deno (inside
+      # the project's own Setup NodeJS action) unpacks the Deno release with
+      # @actions/tool-cache, which shells out to `unzip -o [-q] <zip>` in the
+      # destination directory and needs the binary on PATH. MEASURED on builder-0
+      # (run 34035675036): "Unable to locate executable file: unzip", four minutes
+      # in. builder-1 has unzip, so the two earlier baselines never met this.
+      #
+      # The shim covers exactly that call - one zip, extracted into the cwd or
+      # `-d DIR` - and restores the unix mode bits zipfile keeps in
+      # external_attr, or the deno binary would land non-executable. It is only
+      # put on PATH when the real unzip is absent; `apt-get install unzip` on the
+      # runner retires it.
+      - name: unzip shim (no-root runners)
+        run: |
+          if command -v unzip >/dev/null 2>&1; then echo "unzip present: $(command -v unzip)"; exit 0; fi
+          mkdir -p "$RUNNER_TEMP/unzip-shim"
+          cat > "$RUNNER_TEMP/unzip-shim/unzip" <<'SH'
+          #!/usr/bin/env bash
+          # minimal unzip for @actions/tool-cache: unzip [-o] [-q] FILE [-d DIR]
+          dest="."; file=""
+          while [ $# -gt 0 ]; do case "$1" in -d) dest="$2"; shift 2;; -*) shift;; *) file="$1"; shift;; esac; done
+          [ -n "$file" ] || { echo "unzip shim: no archive given" >&2; exit 2; }
+          python3 - "$file" "$dest" <<'PY'
+          import os, sys, zipfile
+          src, dest = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(src) as z:
+              for info in z.infolist():
+                  out = z.extract(info, dest)
+                  mode = (info.external_attr >> 16) & 0o777
+                  if mode and not info.is_dir():
+                      os.chmod(out, mode)
+          PY
+          SH
+          chmod +x "$RUNNER_TEMP/unzip-shim/unzip"
+          echo "$RUNNER_TEMP/unzip-shim" >> "$GITHUB_PATH"
+          echo "unzip absent on $RUNNER_NAME - python3 shim on PATH for the next steps"
+
+      - name: Setup NodeJS
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ steps.tools.outputs.node-version }}
+          deno-version: ${{ steps.tools.outputs.deno-version }}
+          cache-modules: true
+          install: true
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # chainstrip's buildCommand is `yarn build:ci` inside apps/meteor, which is
+      # `meteor build`. The tool must be on PATH before the run starts, or the
+      # build gate reports every validated dependency as a build failure.
+      # NO PASSWORDLESS sudo ON THIS RUNNER. The installer unpacks into
+      # ~/.meteor and then tries to `sudo cp` a launcher into /usr/local/bin,
+      # which fails with "a terminal is required to read the password". It then
+      # exits ZERO having told you the remedy itself: put $HOME/.meteor on PATH.
+      # MEASURED: the second baseline died here, `meteor: command not found`,
+      # exit 127. The project's own meteor-build action does the sudo cp, which
+      # works on a GitHub-hosted image and cannot work here.
+      #
+      # The launcher self-manages its version: run inside apps/meteor it reads
+      # .meteor/release and fetches METEOR@3.4.1, whatever the bootstrap
+      # installer happened to download.
+      - name: Install Meteor
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.meteor/meteor" ]; then
+            curl https://install.meteor.com | sed s/--progress-bar/-sL/g | /bin/sh || true
+          fi
+          test -x "$HOME/.meteor/meteor"
+          echo "$HOME/.meteor" >> "$GITHUB_PATH"
+
+      # A SEPARATE STEP, because GITHUB_PATH only takes effect in later ones.
+      - name: Verify Meteor
+        run: meteor --version
+
+      - name: probe
+        env:
+          PROBE_SCRIPT: ${{ inputs.script }}
+        run: |
+          echo "runner: $RUNNER_NAME"
+          bash -c "$PROBE_SCRIPT"
