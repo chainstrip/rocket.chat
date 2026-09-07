@@ -134,6 +134,10 @@
       {
         "urlPrefix": "/node_modules/",
         "dir": "apps/meteor/node_modules"
+      },
+      {
+        "urlPrefix": "/packages/",
+        "dir": "apps/meteor/.meteor/local/build/programs/web.browser/packages"
       }
     ]
   }
