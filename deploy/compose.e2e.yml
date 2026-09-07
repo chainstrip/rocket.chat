@@ -1,0 +1,8 @@
+# Override for chainstrip's cove2e: the app runs ON THE HOST (meteor dev in the
+# overlaid workspace), so the services it talks to must be reachable from the
+# host, not only from the compose network. docker-compose-ci.yml publishes
+# mongo (27017) and mock-server (4000) already; httpbin is published here.
+services:
+  httpbin:
+    ports:
+      - "8081:80"
