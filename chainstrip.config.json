@@ -93,5 +93,25 @@
     },
     "suite": "mocha",
     "probeDir": "apps/meteor/.chainstrip-probes"
+  },
+  "e2e": {
+    "buildFirst": false,
+    "serverCommand": [
+      "meteor",
+      "--exclude-archs",
+      "web.browser.legacy, web.cordova"
+    ],
+    "serverCwd": "apps/meteor",
+    "readyUrl": "http://localhost:3000/livez",
+    "readyTimeoutMs": 1800000,
+    "testCommand": [
+      "yarn",
+      "testapi"
+    ],
+    "testCwd": "apps/meteor",
+    "env": {
+      "TEST_MODE": "api"
+    },
+    "gate": "report"
   }
 }

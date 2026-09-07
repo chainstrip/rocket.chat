@@ -170,6 +170,17 @@ jobs:
       - name: Verify Meteor
         run: meteor --version
 
+      # apps/meteor imports the workspace packages from their dist/, so nothing
+      # runs until turbo has built them (cached after the baseline).
+      - name: Build workspace packages
+        run: yarn build
+
+      - uses: ./.github/actions/setup-chainstrip
+        with:
+          version: ${{ vars.CHAINSTRIP_CLI_VERSION || 'latest' }}
+          csbox: ${{ vars.CHAINSTRIP_CSBOX_PACKAGE || '' }}
+          csbox_path: ${{ vars.CHAINSTRIP_CSBOX_PATH }}
+
       - name: probe
         env:
           PROBE_SCRIPT: ${{ inputs.script }}
