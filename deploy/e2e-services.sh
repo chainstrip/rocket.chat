@@ -7,6 +7,13 @@
 # empty one, exactly as the project's own CI does.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# PINNED PATCH, not the floating 8.0 tag CI uses. MEASURED on builder-0
+# (kernel 7.0.0-30-generic, probe run 34145789854): 8.0-ubi8, 8.0-ubi9,
+# 8.2-ubi8 and 7.0-ubi8 all refuse to start - "MongoDB 8.0+ utilizes the
+# tcmalloc allocator which has a known issue with this kernel" - while
+# 8.0.17-ubi8 and 8.2.3-ubi8, which predate that check, start. Same major as
+# CI's matrix. Override with MONGODB_VERSION when the kernel or the image moves.
+export MONGODB_VERSION="${MONGODB_VERSION:-8.0.17}"
 export COMPOSE_PROFILES=api          # mock-server sits behind the api profile
 export COMPOSE_PROJECT_NAME=chainstrip-e2e
 compose() { docker compose -f docker-compose-ci.yml -f deploy/compose.e2e.yml "$@"; }
