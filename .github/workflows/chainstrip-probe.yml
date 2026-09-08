@@ -35,7 +35,7 @@ jobs:
   probe:
     name: probe
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 480 # a whole-UI-suite cove2e is four suite passes of about 45 minutes each, plus covtrim
     permissions:
       contents: read
       packages: read # read @chainstrip/cli from GitHub Packages with the ambient token
