@@ -126,7 +126,8 @@
       "WEBHOOK_TEST_URL": "http://localhost:8081",
       "PLAYWRIGHT_BROWSERS_PATH": "0",
       "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE": "ubuntu24.04-x64",
-      "E2E_UI_SPECS": "tests/e2e/homepage.spec.ts tests/e2e/account-profile.spec.ts tests/e2e/channel-management.spec.ts"
+      "E2E_UI_SPECS": "tests/e2e/homepage.spec.ts tests/e2e/account-profile.spec.ts tests/e2e/channel-management.spec.ts",
+      "IMPORT_MOCK_SERVER_URL": "http://127.0.0.1:4000"
     },
     "gate": "report",
     "browserCoverage": true,
