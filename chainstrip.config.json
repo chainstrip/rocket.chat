@@ -114,11 +114,28 @@
     "serverCwd": "apps/meteor",
     "readyUrl": "http://localhost:3000/livez",
     "readyTimeoutMs": 1800000,
-    "testCommand": [
-      "bash",
-      "deploy/e2e-suite.sh"
+    "suites": [
+      {
+        "name": "api",
+        "testCommand": [
+          "yarn",
+          "testapi"
+        ],
+        "testCwd": "apps/meteor"
+      },
+      {
+        "name": "ui",
+        "testCommand": [
+          "yarn",
+          "playwright",
+          "test",
+          "tests/e2e/homepage.spec.ts",
+          "tests/e2e/account-profile.spec.ts",
+          "tests/e2e/channel-management.spec.ts"
+        ],
+        "testCwd": "apps/meteor"
+      }
     ],
-    "testCwd": ".",
     "env": {
       "TEST_MODE": "api",
       "MONGO_URL": "mongodb://localhost:27017/rocketchat?replicaSet=rs0&directConnection=true",
@@ -126,7 +143,6 @@
       "WEBHOOK_TEST_URL": "http://localhost:8081",
       "PLAYWRIGHT_BROWSERS_PATH": "0",
       "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE": "ubuntu24.04-x64",
-      "E2E_UI_SPECS": "tests/e2e/homepage.spec.ts tests/e2e/account-profile.spec.ts tests/e2e/channel-management.spec.ts",
       "IMPORT_MOCK_SERVER_URL": "http://127.0.0.1:4000"
     },
     "gate": "report",
