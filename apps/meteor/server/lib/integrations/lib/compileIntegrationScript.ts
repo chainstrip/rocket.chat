@@ -58,6 +58,16 @@ function transpileWithBabel(
 			compact: true,
 			minified: true,
 			comments: false,
+			// The script's targets must not depend on the server's working directory.
+			// A dev-run from apps/meteor resolves the app's own browserslist, so
+			// preset-env keeps `class` and the sloppy-mode scripts this transpile
+			// exists to preserve throw "msg is not defined" (MEASURED on the
+			// chainstrip testbed, incoming-integrations.ts:556). The CI image runs
+			// from programs/server, finds no config, and transforms classes. Pin
+			// the production behaviour by ignoring every project-level config.
+			babelrc: false,
+			configFile: false,
+			browserslistConfigFile: false,
 		});
 
 		return { script: result?.code ?? script };
