@@ -190,6 +190,21 @@ jobs:
       - name: Build workspace packages
         run: yarn build
 
+      # THE BROWSER IS NOT IN THE CHECKOUT. chainstrip.config.json's e2e.env sets
+      # PLAYWRIGHT_BROWSERS_PATH=0, which puts it under
+      # node_modules/playwright-core/.local-browsers, and a fresh checkout has
+      # none. MEASURED on bench (run 35090141772): every UI spec died in 4 s with
+      # "browserType.launch: Executable doesn't exist", in BOTH arms, so the ui
+      # suite read stock-red. builder-0 had one from a hand install, which is why
+      # the earlier runs never met this. `channel: chromium` in
+      # playwright.config.ts names the browser. System libraries must already be
+      # on the box: this runner has no root, so no `--with-deps`.
+      - name: Install the Playwright browser
+        run: yarn playwright install chromium
+        working-directory: apps/meteor
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+
       # REFUSE TO MEASURE A TREE THE TESTS DO NOT LOAD. chainstrip writes every
       # overlay to <target>/node_modules/<name>, and node resolves nested-first,
       # so a workspace with its own node_modules shadows the overlay entirely.
