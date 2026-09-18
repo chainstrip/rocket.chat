@@ -36,6 +36,10 @@ on:
         description: "runs-on label of the runner holding the finished baseline (e.g. rc-state)"
         required: true
         default: "rc-state"
+      max_batches:
+        description: "witness campaign batch cap (blank = derived from pending targets; each batch is real LLM spend)"
+        required: false
+        default: ""
 
 concurrency:
   group: chainstrip-baseline
@@ -268,7 +272,12 @@ jobs:
             echo "sweep ran at $sweep_state; HEAD is $(git rev-parse HEAD); paths changed since:"
             git diff --stat "$sweep_state" HEAD 2>/dev/null | tail -20 || echo "  (the sweep commit is not in this checkout's history)"
           fi
-          $CHAINSTRIP witness --campaign --allow-stale-targets
+          # THE BATCH CAP IS EXPLICIT SPEND. The derived default is
+          # ceil(pending/batchSize) x maxAttemptsPerTarget plus one per suite,
+          # which on rocket.chat is hundreds of batches; this input bounds a
+          # campaign whose point is to prove a fix rather than exhaust the list.
+          MAXB="${{ inputs.max_batches }}"
+          $CHAINSTRIP witness --campaign --allow-stale-targets ${MAXB:+--max-batches "$MAXB"}
           accepted="$(node -e "const r=require('./.chainstrip/witness-report.json');console.log((r.probes||[]).filter(p=>p.verdict==='accepted').length)")"
           echo "accepted probes: $accepted"
           echo "accepted=$accepted" >> "$GITHUB_OUTPUT"
