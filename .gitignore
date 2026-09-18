@@ -62,3 +62,7 @@ storybook-static
 development/tempo-data/
 
 .env
+
+# chainstrip state. Untracked here, it makes every measured tree read DIRTY,
+# so the run records no commit and the measurement cannot be cited.
+.chainstrip/
